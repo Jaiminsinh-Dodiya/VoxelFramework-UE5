@@ -1,0 +1,70 @@
+## ---------------------------------------------------
+## Unreal Engine plugin .gitignore
+## ---------------------------------------------------
+
+# Compiled binaries and intermediate build artifacts
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+
+# Per-module build artifacts if the plugin is ever nested under a project root
+**/Binaries/
+**/Intermediate/
+**/DerivedDataCache/
+
+# Precompiled/packaged plugin output
+*.dll
+*.lib
+*.pdb
+*.exp
+*.so
+*.dylib
+*.app
+
+# UnrealHeaderTool / UnrealBuildTool generated files
+*.generated.h
+*.generated.cpp
+*.gen.cpp
+
+# Visual Studio / Rider / VSCode project files (regenerated per-machine)
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.VC.opendb
+.vs/
+.vsconfig
+*.xcodeproj
+*.xcworkspace
+.idea/
+.vscode/
+
+# Unreal Build Accelerator local cache
+.uba/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Log files
+*.log
+
+# Automation/test run artifacts
+Saved/Automation/
+Saved/Logs/
+
+# Packaged builds if ever produced inside this folder
+Saved/StagedBuilds/
+Saved/Cooked/
+
+# Content hot-reload / editor scratch state
+Saved/Config/
+Saved/HardwareSurvey/
+
+# Backup files some editors leave behind
+*.tmp
+*.bak
+*~
