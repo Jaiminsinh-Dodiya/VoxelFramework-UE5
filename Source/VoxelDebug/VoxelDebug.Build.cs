@@ -15,6 +15,8 @@ public class VoxelDebug : ModuleRules
 			"VoxelStorage",
 			"VoxelGeneration",
 			"VoxelAssets",
+			"VoxelMeshing",              // new: real greedy-meshed preview mode
+			"ProceduralMeshComponent",   // debug-tool-only exception to ADR-004 - see VoxelDebugVisualizer.h
 		});
 	}
 }
