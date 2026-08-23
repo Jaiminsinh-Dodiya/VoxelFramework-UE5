@@ -49,6 +49,11 @@
 			"Name": "VoxelDebug",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
+		},
+		{
+    		"Name": "VoxelMeshing",
+    		"Type": "Runtime",
+    		"LoadingPhase": "Default"
 		}
 	],
 	"Plugins": []
