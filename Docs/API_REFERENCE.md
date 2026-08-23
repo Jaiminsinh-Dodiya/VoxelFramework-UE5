@@ -229,10 +229,54 @@ Tunable constants (all `private static constexpr` on the pass class — change a
 
 ---
 
+## VoxelMeshing
+
+### `FVoxelMeshVertex` — `VoxelMeshData.h`
+```cpp
+FVector Position;
+FVector Normal;
+FVector2D UV;
+FLinearColor Color;   // baked AO intensity, RGB uniform per-corner value in [0.25, 1.0], A unused
+```
+Not deduplicated across quads — each quad gets its own 4 vertices even at shared edges (documented future optimization, see `TODO.md`).
+
+### `FVoxelMeshSection` — `VoxelMeshData.h`
+```cpp
+int32 MaterialId;        // UVoxelBlockDefinition::MaterialLayerIndex if a registry was given, else raw FVoxelBlockId
+TArray<uint32> Indices;  // indexes into the owning FVoxelMeshData::Vertices
+```
+
+### `FVoxelMeshData` — `VoxelMeshData.h`
+```cpp
+TArray<FVoxelMeshVertex> Vertices;
+TArray<FVoxelMeshSection> Sections;
+bool IsEmpty() const;
+int32 GetTotalTriangleCount() const;
+```
+
+### `FVoxelMesher` — `VoxelMesher.h`
+```cpp
+static FVoxelMeshData GenerateMesh(const FVoxelChunk& Chunk, const UVoxelBlockRegistry* BlockRegistry);
+```
+`BlockRegistry` may be `nullptr` — falls back to raw `FVoxelBlockId` as material ID, no vertex tint. Chunk-edge voxels are treated as facing air beyond the boundary — **no cross-chunk stitching**, a known gap (see `TODO.md`).
+
+Algorithm: standard binary greedy meshing sweep (3 axes × 2 directions), hidden-face removal inherent to mask construction, per-vertex corner AO (0fps.net-style) computed independent of merge size. Full algorithm notes live as an extensive header comment in `VoxelMesher.cpp` — worth reading directly rather than summarizing further here, since the code and comments are kept in sync.
+
+### `VoxelMeshingService` (namespace) — `VoxelMeshingService.h`
+```cpp
+FVoxelJobHandle RequestMeshAsync(
+    const FVoxelChunk* Chunk,
+    const UVoxelBlockRegistry* BlockRegistry,
+    TFunction<void(FVoxelMeshData&&)> OnComplete);
+```
+Thin pass-through to `FVoxelRuntimeModule::Get().GetScheduler().Submit(...)` — no new scheduling abstraction. **Lifetime caveat, stated explicitly in the header**: takes `Chunk` by raw pointer; caller must guarantee it outlives the dispatched job. No owning/ref-counted chunk lifetime system exists yet (a `VoxelWorldSubsystem` task).
+
+---
+
 ## VoxelDebug
 
 ### `AVoxelDebugVisualizer` — `VoxelDebugVisualizer.h`
-`AActor` (explicitly against `ADR-001` for production chunks — this is a debug-tool exception, see the header comment).
+`AActor` (explicitly against `ADR-001` for production chunks — debug-tool exception, see header comment). Also depends on `ProceduralMeshComponent` (explicitly against the spirit of `ADR-004` for production rendering — separate, narrower debug-tool exception, see `ARCHITECTURE.md` §6).
 
 | Property | Type | Default | Notes |
 |---|---|---|---|
@@ -240,17 +284,21 @@ Tunable constants (all `private static constexpr` on the pass class — change a
 | `ChunkSize` | `int32` | 32 | Independent of `UVoxelRuntimeSettings` |
 | `ChunkRadiusXY` | `int32` | 2 | Chunks generated along X/Y, centered on origin |
 | `ChunkCountZ` | `int32` | 3 | Chunks generated along Z, starting at 0 |
-| `VoxelWorldSize` | `float` | 100.0 | UU per voxel; 100 matches engine cube mesh native size |
-| `BlockMaterials` | `TMap<int32, UMaterialInterface*>` | empty | Per-block-ID color override |
-| `DefaultMaterial` | `UMaterialInterface*` | none | Used for any block ID not in `BlockMaterials` |
+| `VoxelWorldSize` | `float` | 100.0 | UU per voxel; matches both the cube mesh's native size and `FVoxelMesher`'s 1-unit-per-voxel output scale |
+| `BlockMaterials` | `TMap<int32, UMaterialInterface*>` | empty | Shared by both preview modes — keyed by raw block ID (cube mode) / resolved material ID (mesh mode, which is the same value when no registry is configured) |
+| `DefaultMaterial` | `UMaterialInterface*` | none | Fallback for both modes |
 | `Biomes` | `TArray<UVoxelBiomeDefinition*>` | empty | Leave empty to use `TerrainPass`'s flat fallback layering |
+| `bEnableCollisionInMeshPreview` | `bool` | false | Mesh mode only — lets you walk/fly through the preview in PIE if enabled |
 
 ```cpp
-UFUNCTION(CallInEditor) void GenerateAndVisualize();  // clears + regenerates
-UFUNCTION(CallInEditor) void ClearVisualization();
+UFUNCTION(CallInEditor) void GenerateAndVisualize();        // cube-per-visible-voxel mode
+UFUNCTION(CallInEditor) void GenerateAndVisualizeMeshed();  // real FVoxelMesher output via UProceduralMeshComponent
+UFUNCTION(CallInEditor) void ClearVisualization();          // clears components from BOTH modes
 ```
 
-One `UInstancedStaticMeshComponent` per distinct block ID actually placed. "Exposed voxel" culling is per-voxel (skips fully-buried voxels), **not** per-face — still one full cube per visible voxel. Not representative of final triangle counts; exists purely to validate generation output visually.
+Cube mode: one `UInstancedStaticMeshComponent` per distinct block ID, per-voxel exposed-face culling (not per-face — still one full cube per visible voxel).
+
+Mesh mode: one `UProceduralMeshComponent` per generated chunk, one `CreateMeshSection` call per material section within that chunk (vertex/index data remapped from `FVoxelMeshData`'s shared-array-plus-index-list layout into PMC's expected per-section contiguous buffers). Logs total chunks meshed, combined meshing time, vertex/triangle counts.
 
 ---
 
@@ -261,6 +309,7 @@ sequenceDiagram
     participant User as Caller (e.g. VoxelDebug)
     participant Registry as UVoxelBlockRegistry
     participant Pipeline as FVoxelGenerationPipeline
+    participant Mesher as FVoxelMesher
     participant Store as FVoxelChunkStore
 
     User->>Registry: PrecacheBiomeLayers(biomes)  [Game Thread]
@@ -269,4 +318,7 @@ sequenceDiagram
     User->>Pipeline: GenerateChunk(seed, coord, size, Registry, biomes, chunk)
     Note over Pipeline: Climate -> Biome -> Terrain -> Cave<br/>(worker-thread safe, no UObject writes)
     Pipeline-->>User: chunk populated, bIsGenerationWrite=true throughout
+    User->>Mesher: GenerateMesh(chunk, Registry)
+    Note over Mesher: Greedy mesh + hidden-face removal + baked AO<br/>(worker-thread safe, pure function of chunk contents)
+    Mesher-->>User: FVoxelMeshData (plain arrays, no rendering types)
 ```

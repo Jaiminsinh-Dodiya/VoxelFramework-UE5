@@ -2,24 +2,26 @@
 
 **A modular, data-driven voxel world framework for Unreal Engine 5.7 — built as an engine subsystem, not a game.**
 
-Deterministic generation, cache-friendly storage, and a clean module boundary at every layer, designed from day one for mid-range Android/iOS as a first-class target rather than an afterthought.
+Deterministic generation, cache-friendly storage, greedy-meshed geometry, and a clean module boundary at every layer, designed from day one for mid-range Android/iOS as a first-class target rather than an afterthought.
 
 ---
 
 ## Status
 
-> 🚧 **In active development.** Data pipeline (storage → assets → generation) is complete and test-covered. Meshing/rendering has not started yet — see [Roadmap](#roadmap).
+> 🚧 **In active development.** Data pipeline (storage → assets → generation) and meshing are complete and test-covered, with visual validation done via the debug tool. Rendering has not started yet — see [Roadmap](#roadmap).
 
 | Layer | Status |
 |---|---|
 | Storage | ✅ Complete, tested |
 | Assets (blocks/biomes) | ✅ Complete, tested |
 | Generation pipeline | ✅ Climate → Biome → Terrain → Cave, tested |
-| Debug visualization | ✅ Complete |
-| Meshing | ⬜ Not started |
+| Debug visualization | ✅ Complete — cube preview + real-mesh preview |
+| Meshing | ✅ Complete, tested, visually validated |
 | Rendering | ⬜ Not started |
 | Streaming | ⬜ Not started |
 | Serialization | ⬜ Not started |
+
+A **World/Game Design checkpoint** is open regarding Region/Island systems (finite island, regions, handcrafted reservations) — see [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md) §8. This does not block `VoxelRendering`, which is unaffected by that direction, same as `VoxelMeshing` was.
 
 ---
 
@@ -43,8 +45,8 @@ graph TD
     VoxelAssets["VoxelAssets<br/><i>block/biome data assets, registry</i>"]
     VoxelStorage["VoxelStorage<br/><i>chunk pool, voxel buffer</i>"]
     VoxelGeneration["VoxelGeneration<br/><i>Climate → Biome → Terrain → Cave</i>"]
-    VoxelDebug["VoxelDebug<br/><i>cube-per-voxel preview</i>"]
-    VoxelMeshing["VoxelMeshing<br/><i>⬜ not started</i>"]
+    VoxelMeshing["VoxelMeshing<br/><i>greedy meshing, baked AO</i>"]
+    VoxelDebug["VoxelDebug<br/><i>cube + real-mesh preview</i>"]
     VoxelRendering["VoxelRendering<br/><i>⬜ not started</i>"]
     VoxelStreaming["VoxelStreaming<br/><i>⬜ not started</i>"]
     VoxelSerialization["VoxelSerialization<br/><i>⬜ not started</i>"]
@@ -58,10 +60,13 @@ graph TD
     VoxelGeneration --> VoxelAssets
     VoxelGeneration --> VoxelStorage
     VoxelGeneration --> VoxelRuntime
+    VoxelMeshing --> VoxelStorage
+    VoxelMeshing --> VoxelAssets
+    VoxelMeshing --> VoxelRuntime
     VoxelDebug --> VoxelGeneration
+    VoxelDebug --> VoxelMeshing
     VoxelDebug --> VoxelStorage
     VoxelDebug --> VoxelAssets
-    VoxelMeshing -.-> VoxelStorage
     VoxelRendering -.-> VoxelMeshing
     VoxelStreaming -.-> VoxelGeneration
     VoxelStreaming -.-> VoxelRendering
@@ -69,47 +74,30 @@ graph TD
 
     classDef done fill:#1f6f43,stroke:#0d3d24,color:#fff
     classDef pending fill:#3a3a3a,stroke:#1a1a1a,color:#bbb,stroke-dasharray: 4 3
-    class VoxelCore,VoxelRuntime,VoxelMath,VoxelAssets,VoxelStorage,VoxelGeneration,VoxelDebug done
-    class VoxelMeshing,VoxelRendering,VoxelStreaming,VoxelSerialization pending
+    class VoxelCore,VoxelRuntime,VoxelMath,VoxelAssets,VoxelStorage,VoxelGeneration,VoxelMeshing,VoxelDebug done
+    class VoxelRendering,VoxelStreaming,VoxelSerialization pending
 ```
 
-Dashed arrows/nodes are planned but not yet implemented. No arrow ever points backward — `VoxelStorage` has no idea `VoxelGeneration` exists, `VoxelMath` has no idea `VoxelStorage` exists. Each module answers exactly one question.
+Dashed arrows/nodes are planned but not yet implemented. No arrow ever points backward. `VoxelMeshing` depends on `VoxelStorage`/`VoxelAssets`/`VoxelRuntime` only — no knowledge of biomes, regions, or generation logic, exactly per ADR-004.
 
-### Generation pipeline
+### Generation → meshing pipeline
 
 ```mermaid
 flowchart LR
-    Seed(["World Seed<br/>+ Chunk Coordinate"]) --> Climate["ClimatePass<br/><i>temperature / humidity noise</i>"]
-    Climate --> Biome["BiomePass<br/><i>select biome per column</i>"]
-    Biome --> Terrain["TerrainPass<br/><i>height field + resolved<br/>biome layers</i>"]
-    Terrain --> Cave["CavePass<br/><i>3D density carve,<br/>surface-protected</i>"]
-    Cave --> Chunk[("Finished<br/>FVoxelChunk")]
+    Seed(["World Seed<br/>+ Chunk Coordinate"]) --> Climate["ClimatePass"]
+    Climate --> Biome["BiomePass"]
+    Biome --> Terrain["TerrainPass"]
+    Terrain --> Cave["CavePass"]
+    Cave --> Chunk[("FVoxelChunk")]
+    Chunk --> Mesher["FVoxelMesher<br/><i>greedy mesh + AO</i>"]
+    Mesher --> MeshData[("FVoxelMeshData")]
 
     style Seed fill:#2b2b2b,stroke:#555,color:#eee
     style Chunk fill:#1f6f43,stroke:#0d3d24,color:#fff
+    style MeshData fill:#1f6f43,stroke:#0d3d24,color:#fff
 ```
 
-Every pass is a pure, worker-thread-safe function of `(seed, world coordinates)` — no `UObject` access, no Game Thread calls, no shared mutable state. Same seed and coordinate always produce an identical chunk, verified by hash-based automation tests.
-
-### Chunk lifecycle
-
-```mermaid
-sequenceDiagram
-    participant Caller
-    participant Store as FVoxelChunkStore
-    participant Pool as Chunk Pool
-    participant Pipeline as FVoxelGenerationPipeline
-
-    Caller->>Store: CreateOrGetChunk(coordinate)
-    Store->>Pool: reuse free slot or allocate
-    Pool-->>Store: FVoxelChunk*
-    Store-->>Caller: FVoxelChunkHandle (coordinate + generation)
-    Caller->>Pipeline: GenerateChunk(seed, coordinate, ...)
-    Pipeline-->>Caller: writes into FVoxelChunk (bIsGenerationWrite=true)
-    Note over Caller,Store: Later, gameplay edits SetBlock(..., false)<br/>and are tracked separately for diff-based save
-```
-
-Handles carry a generation counter, so a handle captured before a chunk was unloaded and its pool slot reused is detectably stale instead of silently pointing at the wrong data.
+Every generation pass and the mesher itself are pure, worker-thread-safe functions with no `UObject` writes and no Game Thread requirement. Same seed and coordinate always produce an identical chunk and an identical mesh, both verified by hash/count-based automation tests.
 
 ---
 
@@ -119,10 +107,10 @@ Frozen decisions — see [`Docs/ADR.md`](Docs/ADR.md) for full rationale. Summar
 
 | ADR | Decision | Why |
 |---|---|---|
-| 001 | Chunks live in a `UWorldSubsystem`, never as `AActor` | Actor/GC overhead is real cost for thousands of streamed chunks |
+| 001 | Chunks live in a `UWorldSubsystem`, never `AActor` | Actor/GC overhead is real cost for thousands of streamed chunks |
 | 002 | Scheduling via `UE::Tasks`, not a custom thread pool | The engine already solves priority scheduling per-platform |
 | 003 | `FVoxelChunk` is a plain C++ type, referenced by handle | Avoids GC pressure and allocation spikes on mobile |
-| 004 | Meshing and Rendering are separate modules | Different lifetimes, different threading rules |
+| 004 | Meshing and Rendering are separate modules | Different lifetimes, different threading rules — confirmed correct by `VoxelMeshing`'s implementation |
 | 005 | Serialization is diff-based, never whole-world | Mobile storage budgets; determinism from seed is free compression |
 
 ### Performance budgets (design constraints, not aspirations)
@@ -135,7 +123,7 @@ Frozen decisions — see [`Docs/ADR.md`](Docs/ADR.md) for full rationale. Summar
 | Rendering submission | ≤ 1 ms/frame Game Thread |
 | Serialization | Must never block Game Thread |
 
-Measured so far: full `Climate + Biome + Terrain + Cave` pipeline for one 32³ chunk runs in **~0.4–0.6 ms** in-editor (Development build, not yet profiled on-device).
+Measured so far: full `Climate + Biome + Terrain + Cave` pipeline for one 32³ chunk runs in **~0.4–1.2 ms** in-editor. Meshing that same chunk into greedy-merged geometry: **~1.1 ms**, producing ~2120 vertices / 1060 triangles / 3 material sections. Not yet profiled on-device.
 
 ---
 
@@ -144,12 +132,13 @@ Measured so far: full `Climate + Biome + Terrain + Cave` pipeline for one 32³ c
 | Module | Depends on | Responsibility |
 |---|---|---|
 | `VoxelCore` | — | Coordinates, handles, job state, interfaces. Leaf module, no owned systems. |
-| `VoxelRuntime` | `VoxelCore` | `FVoxelScheduler` (wraps `UE::Tasks`), `UVoxelRuntimeSettings` (Project Settings: chunk size, streaming distances, budgets). |
+| `VoxelRuntime` | `VoxelCore` | `FVoxelScheduler` (wraps `UE::Tasks`), `UVoxelRuntimeSettings` (Project Settings). |
 | `VoxelMath` | `VoxelCore` | Deterministic value noise + fBm. Pure functions only. |
-| `VoxelAssets` | `VoxelCore` | `UVoxelBlockDefinition`, `UVoxelBiomeDefinition` data assets; `UVoxelBlockRegistry` resolves block/biome references to fast runtime IDs. |
-| `VoxelStorage` | `VoxelCore`, `VoxelRuntime` | `FVoxelChunk` (dense voxel buffer + modification diff), `FVoxelChunkStore` (pooled, handle-based chunk lifecycle). |
+| `VoxelAssets` | `VoxelCore` | `UVoxelBlockDefinition`, `UVoxelBiomeDefinition` data assets; `UVoxelBlockRegistry`. |
+| `VoxelStorage` | `VoxelCore`, `VoxelRuntime` | `FVoxelChunk`, `FVoxelChunkStore`. |
 | `VoxelGeneration` | `VoxelMath`, `VoxelAssets`, `VoxelStorage` | `IVoxelGenerationPass` pipeline: Climate → Biome → Terrain → Cave. |
-| `VoxelDebug` | `VoxelGeneration`, `VoxelStorage`, `VoxelAssets` | `AVoxelDebugVisualizer` — cube-per-visible-voxel preview for validating generation before investing in real meshing. |
+| `VoxelMeshing` | `VoxelStorage`, `VoxelAssets`, `VoxelRuntime` | `FVoxelMesher` — greedy meshing, hidden-face removal, baked AO. `FVoxelMeshData` plain output, no rendering types. |
+| `VoxelDebug` | `VoxelGeneration`, `VoxelMeshing`, `VoxelStorage`, `VoxelAssets` | `AVoxelDebugVisualizer` — cube-per-voxel preview AND real-mesh preview via `UProceduralMeshComponent` (explicit ADR-004 debug-only exception). |
 
 ---
 
@@ -170,10 +159,17 @@ UnrealEditor-Cmd.exe "YourProject.uproject" -ExecCmds="Automation RunTests Voxel
 | `Voxel.Generation.Cave.DeterministicHash` | Full-chunk CRC32 stability across regeneration |
 | `Voxel.Generation.Cave.AirRatioLogged` | Sanity-bounded air ratio, logged for visibility |
 | `Voxel.Generation.Cave.SurfaceProtected` | Near-surface voxels never carved open |
-| `Voxel.Generation.Cave.BoundaryContinuity` | Adjacent chunks show correlated terrain across the seam (catches chunk-local noise regressions) |
+| `Voxel.Generation.Cave.BoundaryContinuity` | Adjacent chunks show correlated terrain across the seam |
 | `Voxel.Generation.PerfLog` | Logs full-pipeline generation time per chunk |
+| `Voxel.Meshing.EmptyChunk` | All-air chunk produces no geometry |
+| `Voxel.Meshing.SingleVoxel` | Isolated voxel: exact 24 verts / 36 indices / 12 tris |
+| `Voxel.Meshing.AdjacentVoxelsMergeSameMaterial` | Proves greedy merging: 6 quads, not the unmerged 10 |
+| `Voxel.Meshing.MaterialBoundaryPreventsMerge` | Hidden-face removal without cross-material merge: 40v/20tri/2 sections |
+| `Voxel.Meshing.AmbientOcclusionVariesByProximity` | Near-occluder corner strictly darker than open corner, exact values verified |
+| `Voxel.Meshing.DeterministicOutput` | Same chunk meshed twice ⇒ identical vertex data |
+| `Voxel.Meshing.PerfLog` | Logs meshing time, vertex/triangle counts |
 
-**All 9 tests passing** as of the current build.
+**All 16 tests passing** as of the current build.
 
 ---
 
@@ -186,21 +182,23 @@ graph TD
     C --> D["✅ Terrain Generation"]
     D --> E["✅ Cave Pass"]
     E --> F["✅ Debug Visualization"]
-    F --> G["⭐ Greedy Meshing"]
-    G --> H["⬜ Rendering"]
-    H --> I["⬜ Streaming"]
-    I --> J["⬜ Mobile Optimization Pass"]
-    J --> K["⬜ Gameplay Systems"]
+    F --> G["✅ Greedy Meshing"]
+    G --> H["⭐ Rendering"]
+    H --> I["⬜ World Subsystem"]
+    I --> J["⬜ Streaming"]
+    J --> K["⬜ Serialization"]
+    K --> L["⬜ Mobile Optimization Pass"]
+    L --> M["⬜ Gameplay Systems"]
 
     classDef done fill:#1f6f43,stroke:#0d3d24,color:#fff
     classDef next fill:#a67c00,stroke:#5c4600,color:#fff
     classDef pending fill:#3a3a3a,stroke:#1a1a1a,color:#bbb
-    class A,B,C,D,E,F done
-    class G next
-    class H,I,J,K pending
+    class A,B,C,D,E,F,G done
+    class H next
+    class I,J,K,L,M pending
 ```
 
-**Next up:** production greedy meshing (`VoxelMeshing`) — merges coplanar faces instead of emitting one cube per voxel, targets mobile draw-call budgets, runs entirely on worker threads and hands off plain vertex/index arrays to `VoxelRendering`.
+**Next up:** `VoxelRendering` — replaces the debug tool's `UProceduralMeshComponent` with a real custom `FPrimitiveSceneProxy`-based renderer per ADR-004, adding frustum culling, LOD, texture atlasing, and async GPU upload.
 
 ---
 
@@ -209,8 +207,8 @@ graph TD
 1. Copy `VoxelFramework/` into your project's `Plugins/` directory
 2. Regenerate project files (new modules require this)
 3. Build (`Development Editor`, Win64/Android/iOS)
-4. Enable the plugin in **Edit → Plugins** if not already active
-5. To preview generated terrain: place an `AVoxelDebugVisualizer` in a level, configure seed/chunk range in its Details panel, click **Generate And Visualize**
+4. Enable the plugin in **Edit → Plugins** if not already active — also ensure the engine's **Procedural Mesh Component** plugin is enabled (used by `VoxelDebug`'s mesh preview mode only, not by production code)
+5. To preview generated terrain: place an `AVoxelDebugVisualizer` in a level, configure seed/chunk range in its Details panel, click **Generate And Visualize** (cubes) or **Generate And Visualize Meshed** (real greedy-meshed geometry)
 
 Requires **Unreal Engine 5.7**.
 
@@ -222,7 +220,10 @@ Requires **Unreal Engine 5.7**.
 VoxelFramework/
 ├── VoxelFramework.uplugin
 ├── Docs/
-│   └── ADR.md              # Full architecture decision records
+│   ├── ADR.md               # Full architecture decision records
+│   ├── ARCHITECTURE.md      # In-depth internals + design checkpoint
+│   └── API_REFERENCE.md     # Every public class/struct/function
+├── TODO.md
 └── Source/
     ├── VoxelCore/
     ├── VoxelRuntime/
@@ -230,7 +231,8 @@ VoxelFramework/
     ├── VoxelAssets/
     ├── VoxelStorage/
     ├── VoxelGeneration/
-    │   └── Passes/          # ClimatePass, BiomePass, TerrainPass, CavePass
+    │   └── Passes/           # ClimatePass, BiomePass, TerrainPass, CavePass
+    ├── VoxelMeshing/
     └── VoxelDebug/
 ```
 
