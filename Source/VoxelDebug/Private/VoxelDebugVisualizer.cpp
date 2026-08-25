@@ -11,6 +11,7 @@
 #include "VoxelBiomeDefinition.h"
 #include "VoxelMesher.h"
 #include "VoxelMeshData.h"
+#include "VoxelMeshComponent.h"
 #include "HAL/PlatformTime.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelDebug, Log, All);
@@ -79,6 +80,15 @@ void AVoxelDebugVisualizer::ClearVisualization()
 		}
 	}
 	MeshPreviewComponents.Reset();
+
+	for (const TObjectPtr<UVoxelMeshComponent>& Component : RenderedPreviewComponents)
+	{
+		if (Component)
+		{
+			Component->DestroyComponent();
+		}
+	}
+	RenderedPreviewComponents.Reset();
 }
 
 TMap<FVoxelChunkCoordinate, TUniquePtr<FVoxelChunk>> AVoxelDebugVisualizer::GenerateChunkGrid(UVoxelBlockRegistry*& OutRegistry)
@@ -325,4 +335,88 @@ void AVoxelDebugVisualizer::GenerateAndVisualizeMeshed()
 
 	UE_LOG(LogVoxelDebug, Log, TEXT("[Mesh preview] %d chunks meshed in %.2f ms total, %d vertices, %d triangles, %d PMC components."),
 		MeshPreviewComponents.Num(), TotalMeshingMs, TotalVertices, TotalTriangles, MeshPreviewComponents.Num());
+}
+
+void AVoxelDebugVisualizer::GenerateAndVisualizeRendered()
+{
+	ClearVisualization();
+
+	UVoxelBlockRegistry* LocalRegistry = nullptr;
+	TMap<FVoxelChunkCoordinate, TUniquePtr<FVoxelChunk>> GeneratedChunks = GenerateChunkGrid(LocalRegistry);
+
+	int32 TotalVertices = 0;
+	int32 TotalTriangles = 0;
+	double TotalMeshingMs = 0.0;
+
+	// Deliberately mirrors GenerateAndVisualizeMeshed's structure exactly
+	// (same per-chunk granularity, same FVoxelMesher call) so the two modes
+	// are a fair, direct comparison - the ONLY difference should be which
+	// component consumes the resulting FVoxelMeshData.
+	for (const TPair<FVoxelChunkCoordinate, TUniquePtr<FVoxelChunk>>& Entry : GeneratedChunks)
+	{
+		const FVoxelChunkCoordinate& Coord = Entry.Key;
+		const FVoxelChunk& Chunk = *Entry.Value;
+
+		const double MeshStart = FPlatformTime::Seconds();
+		FVoxelMeshData MeshData = FVoxelMesher::GenerateMesh(Chunk, LocalRegistry);
+		TotalMeshingMs += (FPlatformTime::Seconds() - MeshStart) * 1000.0;
+
+		if (MeshData.IsEmpty())
+		{
+			continue;
+		}
+
+		TotalVertices += MeshData.Vertices.Num();
+		TotalTriangles += MeshData.GetTotalTriangleCount();
+
+		// FVoxelMesher outputs 1-unit-per-voxel local positions - scale by
+		// VoxelWorldSize and offset by the chunk's world origin, same
+		// convention as the PMC path, so both modes render at the same
+		// scale/location for a true side-by-side comparison. UVoxelMeshComponent
+		// doesn't know about "chunks" or world scale itself (per ADR-004,
+		// it only knows FVoxelMeshData) - baking this into vertex positions
+		// here, at the debug-tool call site, is the correct place for it,
+		// not inside VoxelRendering.
+		const FVector ChunkWorldOrigin(
+			Coord.X * ChunkSize * VoxelWorldSize,
+			Coord.Y * ChunkSize * VoxelWorldSize,
+			Coord.Z * ChunkSize * VoxelWorldSize);
+
+		for (FVoxelMeshVertex& Vertex : MeshData.Vertices)
+		{
+			Vertex.Position = ChunkWorldOrigin + Vertex.Position * VoxelWorldSize;
+		}
+
+		UVoxelMeshComponent* RenderComponent = NewObject<UVoxelMeshComponent>(this,
+			*FString::Printf(TEXT("RenderedPreview_%d_%d_%d"), Coord.X, Coord.Y, Coord.Z));
+		RenderComponent->SetMobility(EComponentMobility::Movable);
+		RenderComponent->SetupAttachment(RootComponent);
+		RenderComponent->RegisterComponent();
+		RenderComponent->SetCollisionEnabled(bEnableCollisionInMeshPreview ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
+
+		// Assign materials BEFORE SetMeshData, since CreateSceneProxy (triggered
+		// by SetMeshData's MarkRenderStateDirty) reads them via GetMaterial().
+		for (int32 SectionIndex = 0; SectionIndex < MeshData.Sections.Num(); ++SectionIndex)
+		{
+			UMaterialInterface* Material = nullptr;
+			if (TObjectPtr<UMaterialInterface>* Override = BlockMaterials.Find(MeshData.Sections[SectionIndex].MaterialId))
+			{
+				Material = *Override;
+			}
+			else
+			{
+				Material = DefaultMaterial;
+			}
+			if (Material)
+			{
+				RenderComponent->SetMaterial(SectionIndex, Material);
+			}
+		}
+
+		RenderComponent->SetMeshData(MoveTemp(MeshData));
+		RenderedPreviewComponents.Add(RenderComponent);
+	}
+
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Real renderer preview] %d chunks meshed in %.2f ms total, %d vertices, %d triangles, %d UVoxelMeshComponent instances. Compare visually against [Mesh preview] output for the same seed/settings."),
+		RenderedPreviewComponents.Num(), TotalMeshingMs, TotalVertices, TotalTriangles, RenderedPreviewComponents.Num());
 }

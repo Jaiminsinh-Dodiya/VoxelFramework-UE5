@@ -280,17 +280,30 @@ FVoxelMeshData FVoxelMesher::GenerateMesh(const FVoxelChunk& Chunk, const UVoxel
 					FVoxelMeshSection& Section = GetOrAddSection(MaterialId);
 					if (!Cell.bBackFace)
 					{
-						// Front face (+D normal): CCW winding as seen from +D.
+						// Front face (+D normal). NOTE: this order is deliberately the
+						// REVERSE of the mathematically "natural" CCW-from-+Normal
+						// winding (V00,V10,V11 / V00,V11,V01) - Unreal's rasterizer
+						// expects CLOCKWISE winding for front faces in screen space,
+						// not the right-handed-math CCW convention. This was the
+						// source of a real bug: the original ordering here rendered
+						// as fully backface-culled (invisible/black) through
+						// VoxelRendering's FVoxelMeshSceneProxy, which uses a
+						// standard one-sided default material - it only ever looked
+						// correct through VoxelDebug's UProceduralMeshComponent
+						// preview because PMC's fallback material for an unassigned
+						// slot happens to be two-sided, silently masking the wrong
+						// winding. Confirmed via a two-sided-material A/B test
+						// before this fix was made - see Docs/ARCHITECTURE.md.
 						Section.Indices.Append({
-							static_cast<uint32>(BaseVertexIndex + 0), static_cast<uint32>(BaseVertexIndex + 1), static_cast<uint32>(BaseVertexIndex + 2),
-							static_cast<uint32>(BaseVertexIndex + 0), static_cast<uint32>(BaseVertexIndex + 2), static_cast<uint32>(BaseVertexIndex + 3) });
+							static_cast<uint32>(BaseVertexIndex + 0), static_cast<uint32>(BaseVertexIndex + 2), static_cast<uint32>(BaseVertexIndex + 1),
+							static_cast<uint32>(BaseVertexIndex + 0), static_cast<uint32>(BaseVertexIndex + 3), static_cast<uint32>(BaseVertexIndex + 2) });
 					}
 					else
 					{
-						// Back face (-D normal): reversed winding.
+						// Back face (-D normal): reversed relative to the front-face case above.
 						Section.Indices.Append({
-							static_cast<uint32>(BaseVertexIndex + 0), static_cast<uint32>(BaseVertexIndex + 3), static_cast<uint32>(BaseVertexIndex + 2),
-							static_cast<uint32>(BaseVertexIndex + 0), static_cast<uint32>(BaseVertexIndex + 2), static_cast<uint32>(BaseVertexIndex + 1) });
+							static_cast<uint32>(BaseVertexIndex + 0), static_cast<uint32>(BaseVertexIndex + 1), static_cast<uint32>(BaseVertexIndex + 2),
+							static_cast<uint32>(BaseVertexIndex + 0), static_cast<uint32>(BaseVertexIndex + 2), static_cast<uint32>(BaseVertexIndex + 3) });
 					}
 
 					// Zero out the consumed mask region.

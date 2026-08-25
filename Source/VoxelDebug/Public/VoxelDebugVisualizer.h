@@ -1,30 +1,35 @@
 // VoxelDebugVisualizer.h
 //
 // Purpose:
-//   Two debug preview modes for validating generation + meshing before any
-//   time is spent on the real VoxelRendering module:
+//   Three debug preview modes for validating generation + meshing +
+//   rendering before/while VoxelRendering matures:
 //
 //   1. Cube preview (GenerateAndVisualize) - one cube per visible voxel.
 //      Validates generation output (terrain shape, caves, biomes) cheaply.
-//   2. Mesh preview (GenerateAndVisualizeMeshed) - runs the REAL
-//      FVoxelMesher and displays its actual output via
-//      UProceduralMeshComponent. Validates meshing output (greedy merging,
-//      hidden-face removal, baked AO) - this is the first time the actual
-//      production geometry algorithm's output is visible, as opposed to
-//      just passing automation tests.
+//   2. PMC mesh preview (GenerateAndVisualizeMeshed) - runs the REAL
+//      FVoxelMesher and displays its output via UProceduralMeshComponent.
+//      Validates meshing output (greedy merging, hidden-face removal,
+//      baked AO) independent of whether the real renderer works yet.
+//   3. Real renderer preview (GenerateAndVisualizeRendered) - runs the
+//      SAME FVoxelMesher output through the actual production
+//      UVoxelMeshComponent / FVoxelMeshSceneProxy. This is the first mode
+//      that exercises the real rendering path rather than a debug
+//      substitute - compare its output directly against mode 2 (same mesh
+//      data, two different consumers) to sanity-check the custom scene
+//      proxy: if they look identical, that's strong evidence
+//      FVoxelMeshSceneProxy is correct; if they diverge, the difference
+//      points at exactly what to debug.
 //
-//   Neither mode is the production renderer. UProceduralMeshComponent is
-//   an explicit, deliberate exception to ADR-004 ("meshing and rendering
-//   are separate modules, no PMC") - that ADR governs the PRODUCTION
-//   rendering path (VoxelRendering, not built yet). This debug tool exists
-//   specifically to look at FVoxelMeshData's output before that module is
-//   written, and PMC is the fastest way to put arbitrary triangle soup on
-//   screen for a look-and-verify pass. Do not copy this pattern into
-//   VoxelRendering - see ADR.md and the module's own header comment for why.
+//   Modes 1 and 2 are NOT the production renderer. UProceduralMeshComponent
+//   is an explicit, deliberate exception to ADR-004 ("meshing and
+//   rendering are separate modules, no PMC") - that ADR governs the
+//   PRODUCTION rendering path (VoxelRendering). Mode 3 uses the real
+//   production component and is the only one of the three whose visual
+//   output should be trusted as representative of what players will see.
 //
-// Responsibilities: generate a small chunk grid, display it two ways.
-//   Nothing else - no interaction, no collision (mesh mode enables basic
-//   collision only so you can walk/fly through it in PIE if desired).
+// Responsibilities: generate a small chunk grid, display it three ways.
+//   Nothing else - no interaction; mesh/render modes enable basic
+//   collision only so you can walk/fly through it in PIE if desired.
 //
 // Thread ownership: Game Thread only, synchronous. Same tradeoff as the
 //   cube mode - acceptable for a tool run occasionally by hand, not a
@@ -32,7 +37,7 @@
 //
 // Dependencies: Engine (AActor, UInstancedStaticMeshComponent),
 //   ProceduralMeshComponent (debug-only, see above), VoxelCore,
-//   VoxelStorage, VoxelGeneration, VoxelAssets, VoxelMeshing.
+//   VoxelStorage, VoxelGeneration, VoxelAssets, VoxelMeshing, VoxelRendering.
 
 #pragma once
 
@@ -43,6 +48,7 @@
 
 class UInstancedStaticMeshComponent;
 class UProceduralMeshComponent;
+class UVoxelMeshComponent;
 class UStaticMesh;
 class UMaterialInterface;
 class UVoxelBiomeDefinition;
@@ -108,7 +114,11 @@ public:
 	UFUNCTION(CallInEditor, Category = "Voxel Debug|Mesh Preview")
 	void GenerateAndVisualizeMeshed();
 
-	/** Removes all spawned components (both modes) without regenerating. */
+	/** Same FVoxelMesher output as GenerateAndVisualizeMeshed, but through the REAL production UVoxelMeshComponent/FVoxelMeshSceneProxy rather than PMC. Compare against the PMC mode to sanity-check the custom renderer. Clears any existing visualization first. */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|Real Renderer Preview")
+	void GenerateAndVisualizeRendered();
+
+	/** Removes all spawned components (all three modes) without regenerating. */
 	UFUNCTION(CallInEditor, Category = "Voxel Debug")
 	void ClearVisualization();
 
@@ -120,10 +130,15 @@ private:
 	UPROPERTY(Transient)
 	TMap<int32, TObjectPtr<UInstancedStaticMeshComponent>> BlockIdToComponent;
 
-	// Mesh mode: one PMC per generated chunk (simplest correct approach -
+	// PMC mesh mode: one PMC per generated chunk (simplest correct approach -
 	// see .cpp for why this isn't further optimized, it's a debug tool).
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UProceduralMeshComponent>> MeshPreviewComponents;
+
+	// Real renderer mode: one UVoxelMeshComponent per generated chunk, same
+	// per-chunk granularity as the PMC mode for a fair visual comparison.
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UVoxelMeshComponent>> RenderedPreviewComponents;
 
 	UInstancedStaticMeshComponent* GetOrCreateComponentForBlock(int32 BlockId);
 
