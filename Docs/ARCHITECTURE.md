@@ -7,7 +7,7 @@ Companion documents:
 - [`API_REFERENCE.md`](API_REFERENCE.md) — every public class/struct/function, module by module
 - [`TODO.md`](../TODO.md) — what's left, in priority order
 
-> **Currently past the design checkpoint for VoxelMeshing (complete, tested, visually validated) — see §8 for the still-open World/Game Design checkpoint on Region/Island systems, which does not block VoxelRendering.**
+> **Currently past VoxelWorld (complete, tested, visually validated via `AVoxelDebugVisualizer`'s subsystem integration test) — see §8 for the still-open World/Game Design checkpoint on Region/Island systems, which does not block VoxelStreaming.**
 
 ---
 
@@ -36,10 +36,14 @@ VoxelAssets       — block/biome data assets + registry. depends on VoxelCore.
 VoxelStorage      — chunk pool + voxel buffer. depends on VoxelCore, VoxelRuntime.
 VoxelGeneration   — generation pass pipeline. depends on VoxelMath, VoxelAssets, VoxelStorage, VoxelRuntime.
 VoxelMeshing      — greedy meshing + AO. depends on VoxelStorage, VoxelAssets, VoxelRuntime.
-VoxelDebug        — cube + real-mesh preview tool. depends on VoxelGeneration, VoxelMeshing, VoxelStorage, VoxelAssets.
+VoxelRendering    — custom UMeshComponent + FPrimitiveSceneProxy. depends on VoxelMeshing.
+VoxelWorld        — async world subsystem. depends on VoxelCore, VoxelRuntime, VoxelAssets, VoxelStorage, VoxelGeneration, VoxelMeshing, VoxelRendering.
+VoxelDebug        — 5-mode preview tool. depends on VoxelGeneration, VoxelMeshing, VoxelStorage, VoxelAssets, VoxelRendering, VoxelWorld.
 ```
 
 Nothing above `VoxelStorage` in this list knows anything about generation, meshing, or rendering exists. `VoxelStorage` doesn't know `VoxelGeneration` or `VoxelMeshing` exist either — both are *consumers* of storage. Critically, **`VoxelMeshing` does not depend on `VoxelGeneration`** — it only needs a finished `FVoxelChunk`, regardless of how that chunk's contents were produced. This is what makes the ADR-004 separation real rather than aspirational: you could hand `FVoxelMesher::GenerateMesh` a hand-authored chunk (as several automation tests do) and it works identically.
+
+**`VoxelRendering` does not depend on `VoxelGeneration`** either — it only needs `FVoxelMeshData` (plain CPU arrays from `VoxelMeshing`). **`VoxelWorld`** is the integration point that ties all layers together: it owns `FVoxelChunkStore`, dispatches generation+meshing to worker threads via `FVoxelScheduler`, and marshals results back to the Game Thread to create `UVoxelMeshComponent` instances.
 
 See `README.md` for the rendered Mermaid dependency graph.
 
@@ -68,8 +72,14 @@ The only module that's allowed to be "smart" about *why* a voxel is what it is.
 ### VoxelMeshing
 The only module that's allowed to be "smart" about *how to draw* what's there — and nothing more. It doesn't know what a biome is, what a cave is, or that regions might exist someday. Its contract is exactly `FVoxelChunk → FVoxelMeshData`, proven literally true by the fact that its automation tests construct chunks by hand (`Chunk.SetBlock(...)`) with zero involvement from `VoxelGeneration` at all. This is where ADR-004's "meshing and rendering are separate" half also got proven, not just declared: `FVoxelMeshData` is genuinely renderer-agnostic plain data, and the debug tool's `UProceduralMeshComponent` consumption of it (an explicit, documented exception — see §6) demonstrates that any consumer can sit on top without `VoxelMeshing` itself changing.
 
+### VoxelRendering
+The production rendering path per ADR-004. `UVoxelMeshComponent` creates a custom `FVoxelMeshSceneProxy` that uploads `FVoxelMeshData` to GPU vertex/index buffers. Knows nothing about generation, biomes, or chunks — only plain mesh data.
+
+### VoxelWorld
+The integration point. `UVoxelWorldSubsystem` owns the real `FVoxelChunkStore`, calls `UVoxelBlockRegistry::PrecacheBiomeLayers` once at initialize, and dispatches generation+meshing through `FVoxelScheduler` rather than synchronous calls. This is the piece `VoxelDebug` previously faked by hand — now built, tested, and visually validated.
+
 ### VoxelDebug
-Exists specifically to answer "does this look right" without waiting for the real renderer — now covering both generation output (cube mode) and meshing output (real-mesh mode via `UProceduralMeshComponent`). See §6 for why `UProceduralMeshComponent` is allowed here specifically.
+Exists specifically to answer "does this look right" — now covering five modes: cube preview (ISMC), PMC mesh preview, real renderer preview (UVoxelMeshComponent), async subsystem round-trip test, and per-chunk validation with Output Log PASS/FAIL. See §6 for why `UProceduralMeshComponent` is allowed here specifically.
 
 ---
 
@@ -154,7 +164,7 @@ Still true for meshing as it was for generation: nothing currently cancels an in
 
 ## 8. Design checkpoint — World/Game Design (frozen pending decisions)
 
-**Status: `VoxelMeshing` complete, unaffected by this checkpoint exactly as predicted when the checkpoint was opened. Still open for anything touching Regions/Island Foundation.**
+**Status: `VoxelRendering` and `VoxelWorld` complete, unaffected by this checkpoint exactly as predicted. Still open for anything touching Regions/Island Foundation.**
 
 The project's scope has clarified since Phase 0: this is a **reusable framework whose first production customer is a specific game**, not a generic infinite-world voxel engine.
 
@@ -191,15 +201,15 @@ flowchart TD
 
 ### What's still correct to build right now
 
-**`VoxelRendering` is next**, unaffected by any of the above — same reasoning that correctly predicted `VoxelMeshing` would be unaffected. Its contract (`FVoxelMeshData → GPU-visible geometry`) has zero knowledge of biomes, regions, or story content either.
+**`VoxelStreaming` is next**, unaffected by any of the above — same reasoning that correctly predicted `VoxelMeshing`, `VoxelRendering`, and `VoxelWorld` would be unaffected. Its contract ("decide which chunks to load/unload based on player position") has zero knowledge of regions or story content.
 
 ## 9. What's deliberately not built yet
 
-- **No `VoxelWorldSubsystem`.**
+- **No `VoxelStreaming`.** No distance-to-player logic, no automatic chunk loading/unloading. `UVoxelWorldSubsystem::RequestChunk` is called externally.
 - **No River/Structure/Vegetation passes.**
-- **No cross-chunk mesh stitching.** `FVoxelMesher` treats chunk edges as facing air unconditionally — a real gap once multiple chunks render adjacently, explicitly deferred to `VoxelWorldSubsystem`/`VoxelStreaming`.
+- **No cross-chunk mesh stitching.** `FVoxelMesher` treats chunk edges as facing air unconditionally — a real gap once multiple chunks render adjacently, explicitly deferred to `VoxelStreaming`.
 - **No vertex deduplication in meshing output.** Correct, not maximally memory-efficient.
-- **No production rendering.** `VoxelDebug`'s `UProceduralMeshComponent` mode exists specifically so this gap doesn't block validating whether meshing *looks* right — see §6.
 - **No serialization.**
+- **No job cancellation wired up.** `EVoxelJobState::Cancelled` and `FVoxelScheduler::RequestCancel` exist but nothing invokes them yet — deferred to `VoxelStreaming`.
 
 See `TODO.md` for the prioritized version of this list.

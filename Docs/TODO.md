@@ -4,45 +4,39 @@ Living document. Ordered roughly by priority/dependency, not by difficulty — s
 
 See [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md) §9 for the current honest list of what's deliberately not built, and [`Docs/ADR.md`](Docs/ADR.md) for decisions already frozen that future work must respect.
 
-> **World/Game Design checkpoint still open for Region/Island systems** (see `Docs/ARCHITECTURE.md` §8). Nothing below "Paused" should be started until those are decided. `VoxelMeshing` is now complete and was unaffected by the checkpoint, exactly as predicted.
+> **World/Game Design checkpoint still open for Region/Island systems** (see `Docs/ARCHITECTURE.md` §8). Nothing below "Paused" should be started until those are decided. `VoxelRendering` and `VoxelWorld` are now complete and were unaffected by the checkpoint, exactly as predicted.
 
 ---
 
-## Just completed: VoxelMeshing ✅
+## Just completed: VoxelRendering ✅
 
-- [x] `FVoxelMeshData` — plain arrays: positions, normals, UVs, vertex colors, material IDs, indices. No engine mesh types (ADR-004 respected).
-- [x] Greedy meshing algorithm — binary sweep, merges coplanar same-material faces
-- [x] Hidden face removal — never emits a face between two solid voxels
-- [x] Baked ambient occlusion — per-vertex corner AO, independent of merge size
-- [x] Runs on worker threads via `VoxelMeshingService` → `FVoxelScheduler` (no new scheduling abstraction)
-- [x] 7 automation tests: empty chunk, single voxel, adjacent-voxel merge, material boundaries, AO correctness (values match hand-derived math exactly), determinism, perf logging
-- [x] **Visual validation** — extended `VoxelDebug` with a second preview mode (`GenerateAndVisualizeMeshed`) that builds a real `UProceduralMeshComponent` from `FVoxelMesher` output. Confirmed: large flat merged quads visible (proves greedy merging isn't just passing tests, it's visibly reducing geometry), no obvious winding/normal defects, no visible chunk-seam cracks in the tested view.
-- [ ] **Known gap, deliberately deferred**: no cross-chunk face stitching — chunk edges always emit outward faces treating the boundary as air. Will need addressing once multiple chunks render adjacently in the real game (`VoxelWorldSubsystem`/`VoxelStreaming` territory).
-- [ ] **Known gap, deliberately deferred**: no vertex deduplication across quads — correct but not maximally memory-efficient. Future optimization, not urgent.
-- [ ] **Debug-tool note (not a VoxelMeshing defect)**: the `VoxelDebug` vertex-color test material produced an unexpected glowing/emissive look rather than subtle grayscale AO shading — almost certainly a material node wired to Emissive instead of Base Color in the throwaway debug material, not a bug in the baked AO data itself (the automation test's exact numeric match, 0.750/1.000, already confirms the math is correct). Worth a real, correct material once `VoxelRendering` exists; not worth chasing further in the debug tool.
+- [x] Custom `UVoxelMeshComponent` (`UMeshComponent`) + `FVoxelMeshSceneProxy` (`FPrimitiveSceneProxy`) — NOT `ProceduralMeshComponent`, per ADR-004
+- [x] `FStaticMeshVertexBuffers`/`FLocalVertexFactory`, uploaded via `ENQUEUE_RENDER_COMMAND`
+- [x] Proper vertex buffer upload and per-section draw calls with material assignment
+- [x] GPU resource cleanup on destruction
+- [x] Automation test: `Voxel.Rendering.ComponentBookkeeping` — SetMeshData/ClearMeshData lifecycle, material count, bounding box
+- [x] **Visual validation** — extended `VoxelDebug` with `GenerateAndVisualizeRendered` mode that renders real `UVoxelMeshComponent` output side-by-side with the PMC preview for comparison
+- [ ] **Known gap, deliberately deferred**: no frustum culling or LOD (distance-based mesh swap) — deferred to `VoxelStreaming`
+- [ ] **Known gap, deliberately deferred**: no texture atlas + single material optimization — future mobile optimization pass
+- [ ] **Known gap, deliberately deferred**: no async mesh upload (currently synchronous) — future optimization
 
-## Next up: VoxelRendering
+## Just completed: VoxelWorld ✅
 
-Replaces the debug tool's `UProceduralMeshComponent` (explicitly a debug-only exception to ADR-004) with the real production path.
+- [x] `UVoxelWorldSubsystem` (`UWorldSubsystem`) owning the real `FVoxelChunkStore` instance for a world
+- [x] Calls `UVoxelBlockRegistry::PrecacheBiomeLayers` once at Initialize, not per-caller
+- [x] `UVoxelWorldSettings` (`UDeveloperSettings`) for world seed, default biomes, voxel world size, block materials
+- [x] Dispatches chunk generation AND meshing through `FVoxelScheduler` as one worker-thread job
+- [x] Marshals results back to Game Thread via `AsyncTask(ENamedThreads::GameThread)` to create/update `UVoxelMeshComponent`
+- [x] `AVoxelWorldRenderActor` as transient host for dynamically-attached mesh components
+- [x] Idempotent `RequestChunk` — re-requesting same coordinate returns existing handle, no second job
+- [x] `UnloadChunk` removes storage and rendering
+- [x] `FindChunk` / `IsChunkReady` read-only accessors
+- [x] Automation test: `Voxel.World.RequestUnloadBookkeeping` — request/unload lifecycle, idempotency
+- [x] **Visual validation** — `VoxelDebug` integration test: `RequestChunksViaSubsystem` + `ValidateSubsystemResults` (48/48 ALL PASSED)
+- [ ] **Known gap, deliberately deferred**: no job cancellation for in-flight work — deferred to `VoxelStreaming`
+- [ ] **Known gap, deliberately deferred**: `ChunkMeshComponents` uses `TWeakObjectPtr` in a non-UPROPERTY `TMap` keyed by plain `FVoxelChunkCoordinate` (not USTRUCT) — GC safety via actor Outer, not reflection
 
-- [ ] Custom `UMeshComponent` + `FPrimitiveSceneProxy` — **not** `ProceduralMeshComponent`, per ADR-004 and the original spec
-- [ ] `FStaticMeshVertexBuffers`/`FLocalVertexFactory`, uploaded via `ENQUEUE_RENDER_COMMAND`
-- [ ] Frustum culling, LOD (distance-based mesh swap)
-- [ ] Texture atlas + single material (avoid per-block material switches — mobile draw call cost)
-- [ ] Async mesh upload, no Game Thread stall on chunk pop-in
-- [ ] Real, correct material setup for baked vertex-color AO (see debug-tool note above)
-
-## Then: VoxelWorldSubsystem (ties generation + storage + rendering together)
-
-This is the piece that currently doesn't exist and that `VoxelDebug` fakes by hand:
-
-- [ ] `UWorldSubsystem` owning the "real" `FVoxelChunkStore` instance for a world
-- [ ] Calls `UVoxelBlockRegistry::PrecacheBiomeLayers` once at world init, not per-caller
-- [ ] Dispatches chunk generation AND meshing through `FVoxelScheduler` instead of synchronous calls
-- [ ] Reads `UVoxelRuntimeSettings` for chunk size / distances instead of every caller hardcoding them
-- [ ] **This is also where cross-chunk mesh stitching needs to be solved** — chunks need to know about their neighbors' edge data to avoid the seam gap noted above
-
-## Then: VoxelStreaming
+## Next up: VoxelStreaming
 
 - [ ] Priority queue keyed by distance-to-player (`FVoxelChunkCoordinate::ChebyshevDistanceTo`)
 - [ ] Four independently configurable distance bands (already modeled in `UVoxelRuntimeSettings`: simulation/render/generation/persistence — just not consumed yet)
