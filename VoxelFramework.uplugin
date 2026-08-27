@@ -23,9 +23,11 @@
 		{ "Name": "VoxelGeneration", "Type": "Runtime", "LoadingPhase": "Default" },
 		{ "Name": "VoxelMeshing", "Type": "Runtime", "LoadingPhase": "Default" },
 		{ "Name": "VoxelRendering", "Type": "Runtime", "LoadingPhase": "Default" },
+		{ "Name": "VoxelWorld", "Type": "Runtime", "LoadingPhase": "Default" },
 		{ "Name": "VoxelDebug", "Type": "Runtime", "LoadingPhase": "Default" }
 	],
 	"Plugins": [
 		{ "Name": "ProceduralMeshComponent", "Enabled": true }
 	]
 }
+	
