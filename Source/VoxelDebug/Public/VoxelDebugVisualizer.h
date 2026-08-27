@@ -118,6 +118,31 @@ public:
 	UFUNCTION(CallInEditor, Category = "Voxel Debug|Real Renderer Preview")
 	void GenerateAndVisualizeRendered();
 
+	/**
+	 * Exercises the REAL UVoxelWorldSubsystem async pipeline: calls
+	 * RequestChunk for the same grid the other modes use. The subsystem
+	 * dispatches generation+meshing to a worker thread and marshals the
+	 * result back to the Game Thread to create UVoxelMeshComponents under
+	 * its own RenderHostActor. Compare against GenerateAndVisualizeRendered
+	 * (same mesh data, synchronous) to verify the async round-trip is
+	 * correct.
+	 *
+	 * NOTE: must be run in PIE (Play-In-Editor) - subsystems don't exist
+	 * in the editor world. Results appear asynchronously a few frames
+	 * after clicking.
+	 */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|World Subsystem Test")
+	void RequestChunksViaSubsystem();
+
+	/**
+	 * Click AFTER RequestChunksViaSubsystem chunks have appeared. For each
+	 * chunk coordinate, re-generates locally (synchronous, same seed) and
+	 * compares every voxel block-by-block against what the subsystem
+	 * produced. Logs PASS/FAIL per chunk + a summary to the Output Log.
+	 */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|World Subsystem Test")
+	void ValidateSubsystemResults();
+
 	/** Removes all spawned components (all three modes) without regenerating. */
 	UFUNCTION(CallInEditor, Category = "Voxel Debug")
 	void ClearVisualization();

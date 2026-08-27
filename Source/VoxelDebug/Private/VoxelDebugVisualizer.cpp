@@ -12,6 +12,7 @@
 #include "VoxelMesher.h"
 #include "VoxelMeshData.h"
 #include "VoxelMeshComponent.h"
+#include "VoxelWorldSubsystem.h"
 #include "HAL/PlatformTime.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelDebug, Log, All);
@@ -419,4 +420,200 @@ void AVoxelDebugVisualizer::GenerateAndVisualizeRendered()
 
 	UE_LOG(LogVoxelDebug, Log, TEXT("[Real renderer preview] %d chunks meshed in %.2f ms total, %d vertices, %d triangles, %d UVoxelMeshComponent instances. Compare visually against [Mesh preview] output for the same seed/settings."),
 		RenderedPreviewComponents.Num(), TotalMeshingMs, TotalVertices, TotalTriangles, RenderedPreviewComponents.Num());
+}
+
+void AVoxelDebugVisualizer::RequestChunksViaSubsystem()
+{
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld())
+	{
+		UE_LOG(LogVoxelDebug, Error, TEXT("[Subsystem test] Must be run in PIE (Play-In-Editor) - UVoxelWorldSubsystem only exists in game worlds."));
+		return;
+	}
+
+	UVoxelWorldSubsystem* Subsystem = World->GetSubsystem<UVoxelWorldSubsystem>();
+	if (!Subsystem)
+	{
+		UE_LOG(LogVoxelDebug, Error, TEXT("[Subsystem test] UVoxelWorldSubsystem not found on this world. Check that the VoxelWorld module is loaded and the subsystem is registered."));
+		return;
+	}
+
+	// Use the same grid dimensions as the other three modes so the
+	// output is directly comparable by eye.
+	const int32 HalfRadius = ChunkRadiusXY;
+	int32 ChunksRequested = 0;
+
+	for (int32 CX = -HalfRadius; CX < HalfRadius; ++CX)
+	{
+		for (int32 CY = -HalfRadius; CY < HalfRadius; ++CY)
+		{
+			for (int32 CZ = 0; CZ < ChunkCountZ; ++CZ)
+			{
+				const FVoxelChunkCoordinate Coord(CX, CY, CZ);
+				Subsystem->RequestChunk(Coord);
+				++ChunksRequested;
+			}
+		}
+	}
+
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Subsystem test] Dispatched %d RequestChunk calls (ChunkSize=%d, Seed=%d from subsystem settings). Results will appear asynchronously - watch the viewport."),
+		ChunksRequested, Subsystem->GetChunkSize(), Subsystem->GetWorldSeed());
+}
+
+void AVoxelDebugVisualizer::ValidateSubsystemResults()
+{
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld())
+	{
+		UE_LOG(LogVoxelDebug, Error, TEXT("[Subsystem validate] Must be run in PIE."));
+		return;
+	}
+
+	UVoxelWorldSubsystem* Subsystem = World->GetSubsystem<UVoxelWorldSubsystem>();
+	if (!Subsystem)
+	{
+		UE_LOG(LogVoxelDebug, Error, TEXT("[Subsystem validate] UVoxelWorldSubsystem not found."));
+		return;
+	}
+
+	// Use the subsystem's own seed and chunk size - NOT the debug
+	// visualizer's properties - so we're comparing like-for-like.
+	const int32 SubChunkSize = Subsystem->GetChunkSize();
+	const int32 SubSeed = Subsystem->GetWorldSeed();
+
+	// Build a local pipeline for the synchronous reference generation.
+	// No biomes / no registry here - mirrors the subsystem's own pipeline
+	// inputs. If the subsystem has biomes configured, the block IDs will
+	// differ from this bare generation, but that's fine - the subsystem's
+	// FindChunk returns what IT generated, and we regenerate with the same
+	// inputs the subsystem used (it resolves biomes internally). For a
+	// truly fair comparison we'd need the subsystem to expose its biome
+	// list, but for this validation the important signal is determinism:
+	// calling FindChunk returns the exact same data the worker thread wrote.
+	//
+	// NOTE: We can't access the subsystem's private AvailableBiomes/
+	// BlockRegistry from here. Instead, we compare the subsystem's output
+	// against ITSELF: we verify that for each coordinate, IsChunkReady is
+	// true and FindChunk returns non-null with the correct size. Then we
+	// check that re-requesting the same chunk is idempotent (no crash,
+	// same data). The determinism check (same seed -> same data) is
+	// already covered by VoxelGenerationDeterminismTests.
+
+	const int32 HalfRadius = ChunkRadiusXY;
+	int32 TotalChunks = 0;
+	int32 ReadyChunks = 0;
+	int32 PendingChunks = 0;
+	int32 PassedChunks = 0;
+	int32 FailedChunks = 0;
+
+	UE_LOG(LogVoxelDebug, Log, TEXT("========================================"));
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Subsystem validate] Starting validation (Seed=%d, ChunkSize=%d)"), SubSeed, SubChunkSize);
+	UE_LOG(LogVoxelDebug, Log, TEXT("========================================"));
+
+	for (int32 CX = -HalfRadius; CX < HalfRadius; ++CX)
+	{
+		for (int32 CY = -HalfRadius; CY < HalfRadius; ++CY)
+		{
+			for (int32 CZ = 0; CZ < ChunkCountZ; ++CZ)
+			{
+				const FVoxelChunkCoordinate Coord(CX, CY, CZ);
+				++TotalChunks;
+
+				// --- Check 1: Is it ready? ---
+				if (!Subsystem->IsChunkReady(Coord))
+				{
+					++PendingChunks;
+					UE_LOG(LogVoxelDebug, Warning, TEXT("  [PENDING] Chunk (%d,%d,%d) - still generating, try again in a moment."), CX, CY, CZ);
+					continue;
+				}
+				++ReadyChunks;
+
+				// --- Check 2: Can we retrieve the data? ---
+				const FVoxelChunk* SubChunk = Subsystem->FindChunk(Coord);
+				if (!SubChunk)
+				{
+					++FailedChunks;
+					UE_LOG(LogVoxelDebug, Error, TEXT("  [FAIL] Chunk (%d,%d,%d) - IsChunkReady=true but FindChunk returned nullptr!"), CX, CY, CZ);
+					continue;
+				}
+
+				// --- Check 3: Correct size? ---
+				if (SubChunk->GetSize() != SubChunkSize)
+				{
+					++FailedChunks;
+					UE_LOG(LogVoxelDebug, Error, TEXT("  [FAIL] Chunk (%d,%d,%d) - Size mismatch: expected %d, got %d."), CX, CY, CZ, SubChunkSize, SubChunk->GetSize());
+					continue;
+				}
+
+				// --- Check 4: Idempotency - re-requesting shouldn't crash or change data ---
+				const FVoxelChunkHandle Handle = Subsystem->RequestChunk(Coord);
+				if (!Handle.IsValid())
+				{
+					++FailedChunks;
+					UE_LOG(LogVoxelDebug, Error, TEXT("  [FAIL] Chunk (%d,%d,%d) - Re-request returned invalid handle."), CX, CY, CZ);
+					continue;
+				}
+
+				// Verify data is unchanged after re-request
+				const FVoxelChunk* ReChunk = Subsystem->FindChunk(Coord);
+				if (ReChunk != SubChunk)
+				{
+					++FailedChunks;
+					UE_LOG(LogVoxelDebug, Error, TEXT("  [FAIL] Chunk (%d,%d,%d) - Re-request returned different chunk pointer (not idempotent)."), CX, CY, CZ);
+					continue;
+				}
+
+				// --- Check 5: Data sanity - count non-air blocks ---
+				int32 SolidCount = 0;
+				for (int32 LZ = 0; LZ < SubChunkSize; ++LZ)
+				{
+					for (int32 LY = 0; LY < SubChunkSize; ++LY)
+					{
+						for (int32 LX = 0; LX < SubChunkSize; ++LX)
+						{
+							if (SubChunk->GetBlock(LX, LY, LZ) != VoxelBlockId_Air)
+							{
+								++SolidCount;
+							}
+						}
+					}
+				}
+
+				const int32 TotalVoxels = SubChunkSize * SubChunkSize * SubChunkSize;
+				const bool bIsEmpty = SubChunk->IsEmpty();
+				const bool bEmptyConsistent = (SolidCount == 0) == bIsEmpty;
+
+				if (!bEmptyConsistent)
+				{
+					++FailedChunks;
+					UE_LOG(LogVoxelDebug, Error, TEXT("  [FAIL] Chunk (%d,%d,%d) - IsEmpty()=%s but found %d/%d solid voxels."),
+						CX, CY, CZ, bIsEmpty ? TEXT("true") : TEXT("false"), SolidCount, TotalVoxels);
+					continue;
+				}
+
+				++PassedChunks;
+				UE_LOG(LogVoxelDebug, Log, TEXT("  [PASS] Chunk (%d,%d,%d) - Ready, valid, idempotent, %d/%d solid voxels, IsEmpty consistent."),
+					CX, CY, CZ, SolidCount, TotalVoxels);
+			}
+		}
+	}
+
+	UE_LOG(LogVoxelDebug, Log, TEXT("========================================"));
+	if (PendingChunks > 0)
+	{
+		UE_LOG(LogVoxelDebug, Warning, TEXT("[Subsystem validate] %d/%d chunks still pending - click again after they finish."), PendingChunks, TotalChunks);
+	}
+	if (FailedChunks > 0)
+	{
+		UE_LOG(LogVoxelDebug, Error, TEXT("[Subsystem validate] FAILED: %d/%d chunks failed validation."), FailedChunks, TotalChunks);
+	}
+	else if (PendingChunks == 0)
+	{
+		UE_LOG(LogVoxelDebug, Log, TEXT("[Subsystem validate] ALL PASSED: %d/%d chunks validated successfully."), PassedChunks, TotalChunks);
+	}
+	else
+	{
+		UE_LOG(LogVoxelDebug, Log, TEXT("[Subsystem validate] %d passed, %d pending, %d failed out of %d total."), PassedChunks, PendingChunks, FailedChunks, TotalChunks);
+	}
+	UE_LOG(LogVoxelDebug, Log, TEXT("========================================"));
 }
