@@ -13,6 +13,11 @@
 #include "VoxelMeshData.h"
 #include "VoxelMeshComponent.h"
 #include "VoxelWorldSubsystem.h"
+#include "VoxelStreamingManager.h"
+#include "VoxelRuntimeSettings.h"
+#include "Engine/Engine.h"
+#include "Misc/App.h"
+#include "HAL/PlatformMemory.h"
 #include "HAL/PlatformTime.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelDebug, Log, All);
@@ -617,3 +622,182 @@ void AVoxelDebugVisualizer::ValidateSubsystemResults()
 	}
 	UE_LOG(LogVoxelDebug, Log, TEXT("========================================"));
 }
+
+void AVoxelDebugVisualizer::StartPerformanceDiagnostics()
+{
+	if (bDiagnosticsRunning)
+	{
+		UE_LOG(LogVoxelDebug, Warning, TEXT("[Diagnostics] Diagnostics already running."));
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld())
+	{
+		UE_LOG(LogVoxelDebug, Error, TEXT("[Diagnostics] Must be run in PIE (Play-In-Editor) - world subsystems and live frame metrics are only active in game worlds."));
+		return;
+	}
+
+	bDiagnosticsRunning = true;
+
+	// Run initial tick immediately
+	DiagnosticsTick(0.0f);
+
+	// Register 10 Hz ticker (0.1s delay)
+	DiagnosticsTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateUObject(this, &AVoxelDebugVisualizer::DiagnosticsTick),
+		0.1f);
+
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Diagnostics] Started live performance diagnostics (10 Hz). Watch the viewport HUD."));
+}
+
+void AVoxelDebugVisualizer::StopPerformanceDiagnostics()
+{
+	if (!bDiagnosticsRunning && !DiagnosticsTickerHandle.IsValid())
+	{
+		return; // Idempotent
+	}
+
+	bDiagnosticsRunning = false;
+
+	if (DiagnosticsTickerHandle.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(DiagnosticsTickerHandle);
+		DiagnosticsTickerHandle.Reset();
+	}
+
+	if (GEngine)
+	{
+		for (int32 i = 0; i < DiagnosticsLineCount; ++i)
+		{
+			GEngine->RemoveOnScreenDebugMessage(DiagnosticsKeyBase + i);
+		}
+	}
+
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Diagnostics] Performance diagnostics stopped and overlay removed."));
+}
+
+void AVoxelDebugVisualizer::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	StopPerformanceDiagnostics();
+	Super::EndPlay(EndPlayReason);
+}
+
+void AVoxelDebugVisualizer::BeginDestroy()
+{
+	StopPerformanceDiagnostics();
+	Super::BeginDestroy();
+}
+
+bool AVoxelDebugVisualizer::DiagnosticsTick(float DeltaTime)
+{
+	if (!bDiagnosticsRunning)
+	{
+		return false; // Unregister ticker
+	}
+
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld() || !GEngine)
+	{
+		return true; // Keep ticker alive in case world recovers
+	}
+
+	// 1. Engine & Frame Timings
+	const float DeltaSeconds = FApp::GetDeltaTime();
+	const float InstantFps = (DeltaSeconds > 0.0f) ? (1.0f / DeltaSeconds) : 0.0f;
+	const float FrameMs = DeltaSeconds * 1000.0f;
+	const float IdleMs = FApp::GetIdleTime() * 1000.0f;
+	const float WorkMs = FMath::Max(0.0f, FrameMs - IdleMs);
+
+	// 2. Memory Stats
+	const FPlatformMemoryStats MemStats = FPlatformMemory::GetStats();
+	const double PhysicalRamMb = static_cast<double>(MemStats.UsedPhysical) / (1024.0 * 1024.0);
+	const double PeakRamMb = static_cast<double>(MemStats.PeakUsedPhysical) / (1024.0 * 1024.0);
+
+	// 3. Subsystem Metrics
+	UVoxelWorldSubsystem* Subsystem = World->GetSubsystem<UVoxelWorldSubsystem>();
+	UVoxelStreamingManager* StreamingManager = World->GetSubsystem<UVoxelStreamingManager>();
+
+	const int32 ChunkSizeLocal = Subsystem ? Subsystem->GetChunkSize() : ChunkSize;
+	const int32 ManagedCount = StreamingManager ? StreamingManager->GetManagedChunkCount() : 0;
+	const int32 ReadyCount = Subsystem ? Subsystem->GetReadyChunkCount() : 0;
+	const int32 PendingRequests = StreamingManager ? StreamingManager->GetPendingRequestCount() : 0;
+	const int32 PendingUnloads = StreamingManager ? StreamingManager->GetPendingUnloadCount() : 0;
+	const float LastStreamingTickMs = StreamingManager ? StreamingManager->GetLastTickBudgetUsedMs() : 0.0f;
+
+	const UVoxelRuntimeSettings* RuntimeSettings = GetDefault<UVoxelRuntimeSettings>();
+	const float StreamingBudgetLimitMs = RuntimeSettings ? RuntimeSettings->StreamingBudgetMs : 1.5f;
+
+	// Raw Voxel Memory: ManagedChunks * ChunkSize^3 * 2 bytes (FVoxelBlockId = uint16)
+	const double RawVoxelMemoryMb = static_cast<double>(ManagedCount) * (ChunkSizeLocal * ChunkSizeLocal * ChunkSizeLocal * 2) / (1024.0 * 1024.0);
+
+	// 4. Color Evaluation
+	const FColor ColorGreen(50, 230, 50);
+	const FColor ColorYellow(240, 210, 40);
+	const FColor ColorRed(240, 50, 50);
+	const FColor ColorCyan(60, 200, 255);
+	const FColor ColorWhite(230, 230, 230);
+
+	auto GetFpsColor = [&](float InFps) -> FColor
+	{
+		if (InFps >= 30.0f) return ColorGreen;
+		if (InFps >= 25.0f) return ColorYellow;
+		return ColorRed;
+	};
+
+	auto GetFrameTimeColor = [&](float InMs) -> FColor
+	{
+		if (InMs <= 33.33f) return ColorGreen;  // 30+ FPS
+		if (InMs <= 40.0f)  return ColorYellow; // 25-30 FPS
+		return ColorRed;
+	};
+
+	auto GetStreamingColor = [&](float InMs, float BudgetMs) -> FColor
+	{
+		if (InMs <= BudgetMs) return ColorGreen;
+		if (InMs <= BudgetMs * 1.33f) return ColorYellow;
+		return ColorRed;
+	};
+
+	// 5. Draw On-Screen Debug Lines (0.3s display duration for smooth 10 Hz updates)
+	const float DisplayDuration = 0.3f;
+
+	// Line 0: Header
+	GEngine->AddOnScreenDebugMessage(
+		DiagnosticsKeyBase + 0, DisplayDuration, ColorCyan,
+		TEXT("[VOXEL FRAMEWORK: LIVE PERFORMANCE DIAGNOSTICS - 10 Hz]"));
+
+	// Line 1: FPS / Frame Interval
+	GEngine->AddOnScreenDebugMessage(
+		DiagnosticsKeyBase + 1, DisplayDuration, GetFpsColor(InstantFps),
+		FString::Printf(TEXT("  FPS (Frame Interval): %.1f fps (%.2f ms)  [Target >= 30 fps]"), InstantFps, FrameMs));
+
+	// Line 2: Frame Work vs Idle
+	GEngine->AddOnScreenDebugMessage(
+		DiagnosticsKeyBase + 2, DisplayDuration, GetFrameTimeColor(WorkMs),
+		FString::Printf(TEXT("  Frame Work: %.2f ms | Idle/Wait: %.2f ms | Total Delta: %.2f ms  [Mobile Target <= 33.3 ms]"), WorkMs, IdleMs, FrameMs));
+
+	// Line 3: Streaming Work vs Budget
+	GEngine->AddOnScreenDebugMessage(
+		DiagnosticsKeyBase + 3, DisplayDuration, GetStreamingColor(LastStreamingTickMs, StreamingBudgetLimitMs),
+		FString::Printf(TEXT("  Streaming Tick: %.2f ms / Budget: %.2f ms | Queue: %d Req, %d Unload"), LastStreamingTickMs, StreamingBudgetLimitMs, PendingRequests, PendingUnloads));
+
+	// Line 4: Chunk Resident Status
+	GEngine->AddOnScreenDebugMessage(
+		DiagnosticsKeyBase + 4, DisplayDuration, ColorWhite,
+		FString::Printf(TEXT("  Chunks: %d Managed | %d Ready (Meshed & Resident)"), ManagedCount, ReadyCount));
+
+	// Line 5: Memory Usage
+	GEngine->AddOnScreenDebugMessage(
+		DiagnosticsKeyBase + 5, DisplayDuration, ColorWhite,
+		FString::Printf(TEXT("  Raw Voxel Memory (Array Only): %.2f MB | Physical RAM: %.1f MB (Peak: %.1f MB)"), RawVoxelMemoryMb, PhysicalRamMb, PeakRamMb));
+
+	// Line 6: Overall Mobile Status
+	const bool bPassingMobile = (InstantFps >= 30.0f) && (WorkMs <= 33.33f) && (LastStreamingTickMs <= StreamingBudgetLimitMs);
+	GEngine->AddOnScreenDebugMessage(
+		DiagnosticsKeyBase + 6, DisplayDuration, bPassingMobile ? ColorGreen : ColorYellow,
+		FString::Printf(TEXT("  Overall Mobile Budget Status: %s"), bPassingMobile ? TEXT("PASS (Within Mobile Targets)") : TEXT("WARN / REVIEW (Check Timings Above)")));
+
+	return true; // Keep ticking
+}
+
