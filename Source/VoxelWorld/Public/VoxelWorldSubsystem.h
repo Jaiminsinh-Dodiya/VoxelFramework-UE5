@@ -15,13 +15,13 @@
 //     externally, by whatever decides chunks are needed.
 //   - This class does NOT stitch mesh seams across chunk boundaries -
 //     FVoxelMesher already documents that gap, and it is unchanged here.
-//   - This class does NOT implement job cancellation - if UnloadChunk is
-//     called while generation/meshing is still in flight for that
-//     coordinate, the in-flight job still completes and its result is
-//     silently discarded (see OnChunkMeshReady). Wiring real cancellation
-//     through here is explicitly deferred to VoxelStreaming, consistent
-//     with EVoxelJobState::Cancelled existing but being unused everywhere
-//     so far.
+//   - UnloadChunk cancels in-flight jobs via FVoxelScheduler::RequestCancel.
+//     Note that RequestCancel only prevents a Queued job from starting;
+//     a Running job's Work() completes normally (state stays Cancelled).
+//     OnChunkMeshReady guards against this by checking RequestedCoordinates
+//     before acting on the result — this is the actual fix, not optional
+//     defense-in-depth (cancelled-while-running is the common case since
+//     generation+meshing typically finishes near-instantly).
 //
 // Responsibilities:
 //   - Own the FVoxelChunkStore for this world
@@ -51,6 +51,7 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "VoxelCoreTypes.h"
 #include "VoxelChunkStore.h"
+#include "VoxelJobTypes.h"
 #include "VoxelWorldSubsystem.generated.h"
 class FVoxelChunk;
 class UVoxelBlockRegistry;
@@ -78,7 +79,7 @@ public:
 	 */
 	FVoxelChunkHandle RequestChunk(const FVoxelChunkCoordinate& Coordinate);
 
-	/** Removes the chunk's storage and rendering. Does not cancel an in-flight job for this coordinate - see class header. */
+	/** Removes the chunk's storage and rendering. Cancels any in-flight generation/meshing job for this coordinate via FVoxelScheduler::RequestCancel. */
 	void UnloadChunk(const FVoxelChunkCoordinate& Coordinate);
 
 	/** Read-only access to already-generated chunk data. Returns nullptr if not requested, still generating, or unloaded. */
@@ -87,8 +88,13 @@ public:
 	/** True once the chunk has been generated (mesh may still be empty for an all-air chunk - that's a valid ready state, not a pending one). */
 	bool IsChunkReady(const FVoxelChunkCoordinate& Coordinate) const;
 
+	/** Toggle rendering visibility for a chunk's mesh component. No-op if chunk has no component (in-flight or all-air). */
+	void SetChunkVisible(const FVoxelChunkCoordinate& Coordinate, bool bVisible);
+
 	int32 GetChunkSize() const { return ChunkSize; }
 	int32 GetWorldSeed() const { return WorldSeed; }
+	int32 GetReadyChunkCount() const { return ReadyCoordinates.Num(); }
+	int32 GetRequestedChunkCount() const { return RequestedCoordinates.Num(); }
 
 private:
 	void OnChunkMeshReady(FVoxelChunkCoordinate Coordinate, FVoxelMeshData&& MeshData);
@@ -121,6 +127,7 @@ private:
 
 	TSet<FVoxelChunkCoordinate> RequestedCoordinates; // both in-flight and completed - prevents double-dispatch
 	TSet<FVoxelChunkCoordinate> ReadyCoordinates;     // generation completed (mesh may still be empty for all-air chunks)
+	TMap<FVoxelChunkCoordinate, FVoxelJobHandle> InFlightJobHandles; // coord -> scheduler job, removed on completion or cancellation
 
 	int32 ChunkSize = 32;
 	int32 WorldSeed = 1234;
