@@ -2,12 +2,22 @@
 
 #include "VoxelDebugVisualizer.h"
 #include "Components/InstancedStaticMeshComponent.h"
+#include "ProceduralMeshComponent.h"
 #include "Materials/MaterialInterface.h"
 #include "UObject/ConstructorHelpers.h"
 #include "VoxelGenerationPipeline.h"
 #include "VoxelChunk.h"
 #include "VoxelBlockRegistry.h"
 #include "VoxelBiomeDefinition.h"
+#include "VoxelMesher.h"
+#include "VoxelMeshData.h"
+#include "VoxelMeshComponent.h"
+#include "VoxelWorldSubsystem.h"
+#include "VoxelStreamingManager.h"
+#include "VoxelRuntimeSettings.h"
+#include "Engine/Engine.h"
+#include "Misc/App.h"
+#include "HAL/PlatformMemory.h"
 #include "HAL/PlatformTime.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelDebug, Log, All);
@@ -67,6 +77,70 @@ void AVoxelDebugVisualizer::ClearVisualization()
 		}
 	}
 	BlockIdToComponent.Reset();
+
+	for (const TObjectPtr<UProceduralMeshComponent>& Component : MeshPreviewComponents)
+	{
+		if (Component)
+		{
+			Component->DestroyComponent();
+		}
+	}
+	MeshPreviewComponents.Reset();
+
+	for (const TObjectPtr<UVoxelMeshComponent>& Component : RenderedPreviewComponents)
+	{
+		if (Component)
+		{
+			Component->DestroyComponent();
+		}
+	}
+	RenderedPreviewComponents.Reset();
+}
+
+TMap<FVoxelChunkCoordinate, TUniquePtr<FVoxelChunk>> AVoxelDebugVisualizer::GenerateChunkGrid(UVoxelBlockRegistry*& OutRegistry)
+{
+	OutRegistry = nullptr;
+	TArray<const UVoxelBiomeDefinition*> AvailableBiomes;
+
+	if (Biomes.Num() > 0)
+	{
+		OutRegistry = NewObject<UVoxelBlockRegistry>(this);
+		TArray<UVoxelBiomeDefinition*> BiomePtrs;
+		for (const TObjectPtr<UVoxelBiomeDefinition>& Biome : Biomes)
+		{
+			if (Biome)
+			{
+				BiomePtrs.Add(Biome);
+				AvailableBiomes.Add(Biome);
+			}
+		}
+		OutRegistry->PrecacheBiomeLayers(BiomePtrs);
+	}
+
+	FVoxelGenerationPipeline Pipeline;
+	TMap<FVoxelChunkCoordinate, TUniquePtr<FVoxelChunk>> GeneratedChunks;
+
+	const double GenStart = FPlatformTime::Seconds();
+	const int32 HalfRadius = ChunkRadiusXY;
+
+	for (int32 CX = -HalfRadius; CX < HalfRadius; ++CX)
+	{
+		for (int32 CY = -HalfRadius; CY < HalfRadius; ++CY)
+		{
+			for (int32 CZ = 0; CZ < ChunkCountZ; ++CZ)
+			{
+				const FVoxelChunkCoordinate Coord(CX, CY, CZ);
+				TUniquePtr<FVoxelChunk> Chunk = MakeUnique<FVoxelChunk>(ChunkSize);
+				Pipeline.GenerateChunk(WorldSeed, Coord, ChunkSize, OutRegistry, AvailableBiomes, *Chunk);
+				GeneratedChunks.Add(Coord, MoveTemp(Chunk));
+			}
+		}
+	}
+
+	const double GenElapsedMs = (FPlatformTime::Seconds() - GenStart) * 1000.0;
+	UE_LOG(LogVoxelDebug, Log, TEXT("Generated %d chunks in %.2f ms."), GeneratedChunks.Num(), GenElapsedMs);
+
+	return GeneratedChunks;
 }
 
 void AVoxelDebugVisualizer::GenerateAndVisualize()
@@ -79,54 +153,9 @@ void AVoxelDebugVisualizer::GenerateAndVisualize()
 		return;
 	}
 
-	// Build a local, non-subsystem block registry purely to resolve biome
-	// terrain layers for this preview - see VoxelBlockRegistry.h, this must
-	// happen on the Game Thread, which GenerateAndVisualize already is.
 	UVoxelBlockRegistry* LocalRegistry = nullptr;
-	TArray<const UVoxelBiomeDefinition*> AvailableBiomes;
-	if (Biomes.Num() > 0)
-	{
-		LocalRegistry = NewObject<UVoxelBlockRegistry>(this);
-		TArray<UVoxelBiomeDefinition*> BiomePtrs;
-		for (const TObjectPtr<UVoxelBiomeDefinition>& Biome : Biomes)
-		{
-			if (Biome)
-			{
-				BiomePtrs.Add(Biome);
-				AvailableBiomes.Add(Biome);
-			}
-		}
-		LocalRegistry->PrecacheBiomeLayers(BiomePtrs);
-	}
+	TMap<FVoxelChunkCoordinate, TUniquePtr<FVoxelChunk>> GeneratedChunks = GenerateChunkGrid(LocalRegistry);
 
-	FVoxelGenerationPipeline Pipeline;
-
-	const int32 HalfRadius = ChunkRadiusXY;
-	TMap<FVoxelChunkCoordinate, TUniquePtr<FVoxelChunk>> GeneratedChunks;
-
-	const double GenStart = FPlatformTime::Seconds();
-
-	for (int32 CX = -HalfRadius; CX < HalfRadius; ++CX)
-	{
-		for (int32 CY = -HalfRadius; CY < HalfRadius; ++CY)
-		{
-			for (int32 CZ = 0; CZ < ChunkCountZ; ++CZ)
-			{
-				const FVoxelChunkCoordinate Coord(CX, CY, CZ);
-				TUniquePtr<FVoxelChunk> Chunk = MakeUnique<FVoxelChunk>(ChunkSize);
-				Pipeline.GenerateChunk(WorldSeed, Coord, ChunkSize, LocalRegistry, AvailableBiomes, *Chunk);
-				GeneratedChunks.Add(Coord, MoveTemp(Chunk));
-			}
-		}
-	}
-
-	const double GenElapsedMs = (FPlatformTime::Seconds() - GenStart) * 1000.0;
-	UE_LOG(LogVoxelDebug, Log, TEXT("Generated %d chunks in %.2f ms."), GeneratedChunks.Num(), GenElapsedMs);
-
-	// World-space voxel lookup across the whole generated region, treating
-	// anything outside it (ungenerated chunks) as air - this means edge
-	// chunks show their outward faces, which is the expected/correct look
-	// for a bounded debug preview.
 	auto GetGlobalBlock = [&](int32 WorldX, int32 WorldY, int32 WorldZ) -> FVoxelBlockId
 	{
 		const int32 CX = FMath::FloorToInt(static_cast<float>(WorldX) / ChunkSize);
@@ -173,10 +202,6 @@ void AVoxelDebugVisualizer::GenerateAndVisualize()
 					const int32 WorldY = BaseY + LocalY;
 					const int32 WorldZ = BaseZ + LocalZ;
 
-					// Cheap culling: skip voxels fully surrounded by solid
-					// neighbors on all 6 sides - not real face culling
-					// (still one cube per exposed voxel, not per face), but
-					// enough to keep instance counts sane for a debug tool.
 					const bool bExposed =
 						GetGlobalBlock(WorldX + 1, WorldY, WorldZ) == VoxelBlockId_Air ||
 						GetGlobalBlock(WorldX - 1, WorldY, WorldZ) == VoxelBlockId_Air ||
@@ -194,7 +219,7 @@ void AVoxelDebugVisualizer::GenerateAndVisualize()
 					UInstancedStaticMeshComponent* Component = GetOrCreateComponentForBlock(BlockId);
 
 					const FVector Location(WorldX * VoxelWorldSize, WorldY * VoxelWorldSize, WorldZ * VoxelWorldSize);
-					const float Scale = VoxelWorldSize / 100.0f; // cube mesh is 100uu native
+					const float Scale = VoxelWorldSize / 100.0f;
 					FTransform InstanceTransform(FRotator::ZeroRotator, Location, FVector(Scale));
 					Component->AddInstance(InstanceTransform);
 				}
@@ -202,6 +227,577 @@ void AVoxelDebugVisualizer::GenerateAndVisualize()
 		}
 	}
 
-	UE_LOG(LogVoxelDebug, Log, TEXT("Visualized %d/%d solid voxels (%d culled as fully buried) across %d block-ID components."),
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Cube preview] Visualized %d/%d solid voxels (%d culled as fully buried) across %d block-ID components."),
 		TotalVisibleVoxels, TotalSolidVoxels, TotalSolidVoxels - TotalVisibleVoxels, BlockIdToComponent.Num());
 }
+
+void AVoxelDebugVisualizer::GenerateAndVisualizeMeshed()
+{
+	ClearVisualization();
+
+	UVoxelBlockRegistry* LocalRegistry = nullptr;
+	TMap<FVoxelChunkCoordinate, TUniquePtr<FVoxelChunk>> GeneratedChunks = GenerateChunkGrid(LocalRegistry);
+
+	int32 TotalVertices = 0;
+	int32 TotalTriangles = 0;
+	double TotalMeshingMs = 0.0;
+
+	// One PMC per chunk - simplest correct approach for a debug tool. A
+	// real world subsystem would likely want fewer, larger draw calls, but
+	// that's a VoxelRendering concern, not something to optimize here.
+	for (const TPair<FVoxelChunkCoordinate, TUniquePtr<FVoxelChunk>>& Entry : GeneratedChunks)
+	{
+		const FVoxelChunkCoordinate& Coord = Entry.Key;
+		const FVoxelChunk& Chunk = *Entry.Value;
+
+		const double MeshStart = FPlatformTime::Seconds();
+		const FVoxelMeshData MeshData = FVoxelMesher::GenerateMesh(Chunk, LocalRegistry);
+		TotalMeshingMs += (FPlatformTime::Seconds() - MeshStart) * 1000.0;
+
+		if (MeshData.IsEmpty())
+		{
+			continue; // fully-air chunk, nothing to show
+		}
+
+		UProceduralMeshComponent* PMC = NewObject<UProceduralMeshComponent>(this,
+			*FString::Printf(TEXT("MeshPreview_%d_%d_%d"), Coord.X, Coord.Y, Coord.Z));
+		PMC->SetMobility(EComponentMobility::Movable);
+		PMC->SetupAttachment(RootComponent);
+		PMC->RegisterComponent();
+		PMC->bUseComplexAsSimpleCollision = true;
+
+		// Shared per-chunk conversion buffers, rebuilt per section since
+		// FVoxelMeshData::Vertices is one shared array indexed by each
+		// section's own index list - PMC wants one contiguous vertex/index
+		// buffer per section, so we remap indices into a compact per-section range.
+		const FVector ChunkWorldOrigin(
+			Coord.X * ChunkSize * VoxelWorldSize,
+			Coord.Y * ChunkSize * VoxelWorldSize,
+			Coord.Z * ChunkSize * VoxelWorldSize);
+
+		for (int32 SectionIndex = 0; SectionIndex < MeshData.Sections.Num(); ++SectionIndex)
+		{
+			const FVoxelMeshSection& Section = MeshData.Sections[SectionIndex];
+			if (Section.Indices.Num() == 0)
+			{
+				continue;
+			}
+
+			TArray<FVector> Positions;
+			TArray<FVector> Normals;
+			TArray<FVector2D> UVs;
+			TArray<FColor> VertexColors;
+			TArray<int32> Triangles;
+			TArray<FProcMeshTangent> Tangents; // left empty - fine for a debug preview, PMC handles it gracefully
+
+			TMap<uint32, int32> GlobalToLocalVertexIndex;
+			Positions.Reserve(Section.Indices.Num());
+			Normals.Reserve(Section.Indices.Num());
+			UVs.Reserve(Section.Indices.Num());
+			VertexColors.Reserve(Section.Indices.Num());
+			Triangles.Reserve(Section.Indices.Num());
+
+			for (uint32 GlobalIndex : Section.Indices)
+			{
+				int32 LocalIndex;
+				if (const int32* Existing = GlobalToLocalVertexIndex.Find(GlobalIndex))
+				{
+					LocalIndex = *Existing;
+				}
+				else
+				{
+					const FVoxelMeshVertex& SourceVertex = MeshData.Vertices[GlobalIndex];
+					LocalIndex = Positions.Add(ChunkWorldOrigin + SourceVertex.Position * VoxelWorldSize);
+					Normals.Add(SourceVertex.Normal);
+					UVs.Add(SourceVertex.UV);
+					VertexColors.Add(SourceVertex.Color.ToFColor(/*bSRGB=*/true));
+					GlobalToLocalVertexIndex.Add(GlobalIndex, LocalIndex);
+				}
+				Triangles.Add(LocalIndex);
+			}
+
+			PMC->CreateMeshSection(SectionIndex, Positions, Triangles, Normals, UVs, VertexColors, Tangents, bEnableCollisionInMeshPreview);
+
+			UMaterialInterface* Material = nullptr;
+			if (TObjectPtr<UMaterialInterface>* Override = BlockMaterials.Find(Section.MaterialId))
+			{
+				Material = *Override;
+			}
+			else
+			{
+				Material = DefaultMaterial;
+			}
+			if (Material)
+			{
+				PMC->SetMaterial(SectionIndex, Material);
+			}
+
+			TotalVertices += Positions.Num();
+			TotalTriangles += Triangles.Num() / 3;
+		}
+
+		MeshPreviewComponents.Add(PMC);
+	}
+
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Mesh preview] %d chunks meshed in %.2f ms total, %d vertices, %d triangles, %d PMC components."),
+		MeshPreviewComponents.Num(), TotalMeshingMs, TotalVertices, TotalTriangles, MeshPreviewComponents.Num());
+}
+
+void AVoxelDebugVisualizer::GenerateAndVisualizeRendered()
+{
+	ClearVisualization();
+
+	UVoxelBlockRegistry* LocalRegistry = nullptr;
+	TMap<FVoxelChunkCoordinate, TUniquePtr<FVoxelChunk>> GeneratedChunks = GenerateChunkGrid(LocalRegistry);
+
+	int32 TotalVertices = 0;
+	int32 TotalTriangles = 0;
+	double TotalMeshingMs = 0.0;
+
+	// Deliberately mirrors GenerateAndVisualizeMeshed's structure exactly
+	// (same per-chunk granularity, same FVoxelMesher call) so the two modes
+	// are a fair, direct comparison - the ONLY difference should be which
+	// component consumes the resulting FVoxelMeshData.
+	for (const TPair<FVoxelChunkCoordinate, TUniquePtr<FVoxelChunk>>& Entry : GeneratedChunks)
+	{
+		const FVoxelChunkCoordinate& Coord = Entry.Key;
+		const FVoxelChunk& Chunk = *Entry.Value;
+
+		const double MeshStart = FPlatformTime::Seconds();
+		FVoxelMeshData MeshData = FVoxelMesher::GenerateMesh(Chunk, LocalRegistry);
+		TotalMeshingMs += (FPlatformTime::Seconds() - MeshStart) * 1000.0;
+
+		if (MeshData.IsEmpty())
+		{
+			continue;
+		}
+
+		TotalVertices += MeshData.Vertices.Num();
+		TotalTriangles += MeshData.GetTotalTriangleCount();
+
+		// FVoxelMesher outputs 1-unit-per-voxel local positions - scale by
+		// VoxelWorldSize and offset by the chunk's world origin, same
+		// convention as the PMC path, so both modes render at the same
+		// scale/location for a true side-by-side comparison. UVoxelMeshComponent
+		// doesn't know about "chunks" or world scale itself (per ADR-004,
+		// it only knows FVoxelMeshData) - baking this into vertex positions
+		// here, at the debug-tool call site, is the correct place for it,
+		// not inside VoxelRendering.
+		const FVector ChunkWorldOrigin(
+			Coord.X * ChunkSize * VoxelWorldSize,
+			Coord.Y * ChunkSize * VoxelWorldSize,
+			Coord.Z * ChunkSize * VoxelWorldSize);
+
+		for (FVoxelMeshVertex& Vertex : MeshData.Vertices)
+		{
+			Vertex.Position = ChunkWorldOrigin + Vertex.Position * VoxelWorldSize;
+		}
+
+		UVoxelMeshComponent* RenderComponent = NewObject<UVoxelMeshComponent>(this,
+			*FString::Printf(TEXT("RenderedPreview_%d_%d_%d"), Coord.X, Coord.Y, Coord.Z));
+		RenderComponent->SetMobility(EComponentMobility::Movable);
+		RenderComponent->SetupAttachment(RootComponent);
+		RenderComponent->RegisterComponent();
+		RenderComponent->SetCollisionEnabled(bEnableCollisionInMeshPreview ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
+
+		// Assign materials BEFORE SetMeshData, since CreateSceneProxy (triggered
+		// by SetMeshData's MarkRenderStateDirty) reads them via GetMaterial().
+		for (int32 SectionIndex = 0; SectionIndex < MeshData.Sections.Num(); ++SectionIndex)
+		{
+			UMaterialInterface* Material = nullptr;
+			if (TObjectPtr<UMaterialInterface>* Override = BlockMaterials.Find(MeshData.Sections[SectionIndex].MaterialId))
+			{
+				Material = *Override;
+			}
+			else
+			{
+				Material = DefaultMaterial;
+			}
+			if (Material)
+			{
+				RenderComponent->SetMaterial(SectionIndex, Material);
+			}
+		}
+
+		RenderComponent->SetMeshData(MoveTemp(MeshData));
+		RenderedPreviewComponents.Add(RenderComponent);
+	}
+
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Real renderer preview] %d chunks meshed in %.2f ms total, %d vertices, %d triangles, %d UVoxelMeshComponent instances. Compare visually against [Mesh preview] output for the same seed/settings."),
+		RenderedPreviewComponents.Num(), TotalMeshingMs, TotalVertices, TotalTriangles, RenderedPreviewComponents.Num());
+}
+
+void AVoxelDebugVisualizer::RequestChunksViaSubsystem()
+{
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld())
+	{
+		UE_LOG(LogVoxelDebug, Error, TEXT("[Subsystem test] Must be run in PIE (Play-In-Editor) - UVoxelWorldSubsystem only exists in game worlds."));
+		return;
+	}
+
+	UVoxelWorldSubsystem* Subsystem = World->GetSubsystem<UVoxelWorldSubsystem>();
+	if (!Subsystem)
+	{
+		UE_LOG(LogVoxelDebug, Error, TEXT("[Subsystem test] UVoxelWorldSubsystem not found on this world. Check that the VoxelWorld module is loaded and the subsystem is registered."));
+		return;
+	}
+
+	// Use the same grid dimensions as the other three modes so the
+	// output is directly comparable by eye.
+	const int32 HalfRadius = ChunkRadiusXY;
+	int32 ChunksRequested = 0;
+
+	for (int32 CX = -HalfRadius; CX < HalfRadius; ++CX)
+	{
+		for (int32 CY = -HalfRadius; CY < HalfRadius; ++CY)
+		{
+			for (int32 CZ = 0; CZ < ChunkCountZ; ++CZ)
+			{
+				const FVoxelChunkCoordinate Coord(CX, CY, CZ);
+				Subsystem->RequestChunk(Coord);
+				++ChunksRequested;
+			}
+		}
+	}
+
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Subsystem test] Dispatched %d RequestChunk calls (ChunkSize=%d, Seed=%d from subsystem settings). Results will appear asynchronously - watch the viewport."),
+		ChunksRequested, Subsystem->GetChunkSize(), Subsystem->GetWorldSeed());
+}
+
+void AVoxelDebugVisualizer::ValidateSubsystemResults()
+{
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld())
+	{
+		UE_LOG(LogVoxelDebug, Error, TEXT("[Subsystem validate] Must be run in PIE."));
+		return;
+	}
+
+	UVoxelWorldSubsystem* Subsystem = World->GetSubsystem<UVoxelWorldSubsystem>();
+	if (!Subsystem)
+	{
+		UE_LOG(LogVoxelDebug, Error, TEXT("[Subsystem validate] UVoxelWorldSubsystem not found."));
+		return;
+	}
+
+	// Use the subsystem's own seed and chunk size - NOT the debug
+	// visualizer's properties - so we're comparing like-for-like.
+	const int32 SubChunkSize = Subsystem->GetChunkSize();
+	const int32 SubSeed = Subsystem->GetWorldSeed();
+
+	// Build a local pipeline for the synchronous reference generation.
+	// No biomes / no registry here - mirrors the subsystem's own pipeline
+	// inputs. If the subsystem has biomes configured, the block IDs will
+	// differ from this bare generation, but that's fine - the subsystem's
+	// FindChunk returns what IT generated, and we regenerate with the same
+	// inputs the subsystem used (it resolves biomes internally). For a
+	// truly fair comparison we'd need the subsystem to expose its biome
+	// list, but for this validation the important signal is determinism:
+	// calling FindChunk returns the exact same data the worker thread wrote.
+	//
+	// NOTE: We can't access the subsystem's private AvailableBiomes/
+	// BlockRegistry from here. Instead, we compare the subsystem's output
+	// against ITSELF: we verify that for each coordinate, IsChunkReady is
+	// true and FindChunk returns non-null with the correct size. Then we
+	// check that re-requesting the same chunk is idempotent (no crash,
+	// same data). The determinism check (same seed -> same data) is
+	// already covered by VoxelGenerationDeterminismTests.
+
+	const int32 HalfRadius = ChunkRadiusXY;
+	int32 TotalChunks = 0;
+	int32 ReadyChunks = 0;
+	int32 PendingChunks = 0;
+	int32 PassedChunks = 0;
+	int32 FailedChunks = 0;
+
+	UE_LOG(LogVoxelDebug, Log, TEXT("========================================"));
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Subsystem validate] Starting validation (Seed=%d, ChunkSize=%d)"), SubSeed, SubChunkSize);
+	UE_LOG(LogVoxelDebug, Log, TEXT("========================================"));
+
+	for (int32 CX = -HalfRadius; CX < HalfRadius; ++CX)
+	{
+		for (int32 CY = -HalfRadius; CY < HalfRadius; ++CY)
+		{
+			for (int32 CZ = 0; CZ < ChunkCountZ; ++CZ)
+			{
+				const FVoxelChunkCoordinate Coord(CX, CY, CZ);
+				++TotalChunks;
+
+				// --- Check 1: Is it ready? ---
+				if (!Subsystem->IsChunkReady(Coord))
+				{
+					++PendingChunks;
+					UE_LOG(LogVoxelDebug, Warning, TEXT("  [PENDING] Chunk (%d,%d,%d) - still generating, try again in a moment."), CX, CY, CZ);
+					continue;
+				}
+				++ReadyChunks;
+
+				// --- Check 2: Can we retrieve the data? ---
+				const FVoxelChunk* SubChunk = Subsystem->FindChunk(Coord);
+				if (!SubChunk)
+				{
+					++FailedChunks;
+					UE_LOG(LogVoxelDebug, Error, TEXT("  [FAIL] Chunk (%d,%d,%d) - IsChunkReady=true but FindChunk returned nullptr!"), CX, CY, CZ);
+					continue;
+				}
+
+				// --- Check 3: Correct size? ---
+				if (SubChunk->GetSize() != SubChunkSize)
+				{
+					++FailedChunks;
+					UE_LOG(LogVoxelDebug, Error, TEXT("  [FAIL] Chunk (%d,%d,%d) - Size mismatch: expected %d, got %d."), CX, CY, CZ, SubChunkSize, SubChunk->GetSize());
+					continue;
+				}
+
+				// --- Check 4: Idempotency - re-requesting shouldn't crash or change data ---
+				const FVoxelChunkHandle Handle = Subsystem->RequestChunk(Coord);
+				if (!Handle.IsValid())
+				{
+					++FailedChunks;
+					UE_LOG(LogVoxelDebug, Error, TEXT("  [FAIL] Chunk (%d,%d,%d) - Re-request returned invalid handle."), CX, CY, CZ);
+					continue;
+				}
+
+				// Verify data is unchanged after re-request
+				const FVoxelChunk* ReChunk = Subsystem->FindChunk(Coord);
+				if (ReChunk != SubChunk)
+				{
+					++FailedChunks;
+					UE_LOG(LogVoxelDebug, Error, TEXT("  [FAIL] Chunk (%d,%d,%d) - Re-request returned different chunk pointer (not idempotent)."), CX, CY, CZ);
+					continue;
+				}
+
+				// --- Check 5: Data sanity - count non-air blocks ---
+				int32 SolidCount = 0;
+				for (int32 LZ = 0; LZ < SubChunkSize; ++LZ)
+				{
+					for (int32 LY = 0; LY < SubChunkSize; ++LY)
+					{
+						for (int32 LX = 0; LX < SubChunkSize; ++LX)
+						{
+							if (SubChunk->GetBlock(LX, LY, LZ) != VoxelBlockId_Air)
+							{
+								++SolidCount;
+							}
+						}
+					}
+				}
+
+				const int32 TotalVoxels = SubChunkSize * SubChunkSize * SubChunkSize;
+				const bool bIsEmpty = SubChunk->IsEmpty();
+				const bool bEmptyConsistent = (SolidCount == 0) == bIsEmpty;
+
+				if (!bEmptyConsistent)
+				{
+					++FailedChunks;
+					UE_LOG(LogVoxelDebug, Error, TEXT("  [FAIL] Chunk (%d,%d,%d) - IsEmpty()=%s but found %d/%d solid voxels."),
+						CX, CY, CZ, bIsEmpty ? TEXT("true") : TEXT("false"), SolidCount, TotalVoxels);
+					continue;
+				}
+
+				++PassedChunks;
+				UE_LOG(LogVoxelDebug, Log, TEXT("  [PASS] Chunk (%d,%d,%d) - Ready, valid, idempotent, %d/%d solid voxels, IsEmpty consistent."),
+					CX, CY, CZ, SolidCount, TotalVoxels);
+			}
+		}
+	}
+
+	UE_LOG(LogVoxelDebug, Log, TEXT("========================================"));
+	if (PendingChunks > 0)
+	{
+		UE_LOG(LogVoxelDebug, Warning, TEXT("[Subsystem validate] %d/%d chunks still pending - click again after they finish."), PendingChunks, TotalChunks);
+	}
+	if (FailedChunks > 0)
+	{
+		UE_LOG(LogVoxelDebug, Error, TEXT("[Subsystem validate] FAILED: %d/%d chunks failed validation."), FailedChunks, TotalChunks);
+	}
+	else if (PendingChunks == 0)
+	{
+		UE_LOG(LogVoxelDebug, Log, TEXT("[Subsystem validate] ALL PASSED: %d/%d chunks validated successfully."), PassedChunks, TotalChunks);
+	}
+	else
+	{
+		UE_LOG(LogVoxelDebug, Log, TEXT("[Subsystem validate] %d passed, %d pending, %d failed out of %d total."), PassedChunks, PendingChunks, FailedChunks, TotalChunks);
+	}
+	UE_LOG(LogVoxelDebug, Log, TEXT("========================================"));
+}
+
+void AVoxelDebugVisualizer::StartPerformanceDiagnostics()
+{
+	if (bDiagnosticsRunning)
+	{
+		UE_LOG(LogVoxelDebug, Warning, TEXT("[Diagnostics] Diagnostics already running."));
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld())
+	{
+		UE_LOG(LogVoxelDebug, Error, TEXT("[Diagnostics] Must be run in PIE (Play-In-Editor) - world subsystems and live frame metrics are only active in game worlds."));
+		return;
+	}
+
+	bDiagnosticsRunning = true;
+
+	// Run initial tick immediately
+	DiagnosticsTick(0.0f);
+
+	// Register 10 Hz ticker (0.1s delay)
+	DiagnosticsTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateUObject(this, &AVoxelDebugVisualizer::DiagnosticsTick),
+		0.1f);
+
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Diagnostics] Started live performance diagnostics (10 Hz). Watch the viewport HUD."));
+}
+
+void AVoxelDebugVisualizer::StopPerformanceDiagnostics()
+{
+	if (!bDiagnosticsRunning && !DiagnosticsTickerHandle.IsValid())
+	{
+		return; // Idempotent
+	}
+
+	bDiagnosticsRunning = false;
+
+	if (DiagnosticsTickerHandle.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(DiagnosticsTickerHandle);
+		DiagnosticsTickerHandle.Reset();
+	}
+
+	if (GEngine)
+	{
+		for (int32 i = 0; i < DiagnosticsLineCount; ++i)
+		{
+			GEngine->RemoveOnScreenDebugMessage(DiagnosticsKeyBase + i);
+		}
+	}
+
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Diagnostics] Performance diagnostics stopped and overlay removed."));
+}
+
+void AVoxelDebugVisualizer::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	StopPerformanceDiagnostics();
+	Super::EndPlay(EndPlayReason);
+}
+
+void AVoxelDebugVisualizer::BeginDestroy()
+{
+	StopPerformanceDiagnostics();
+	Super::BeginDestroy();
+}
+
+bool AVoxelDebugVisualizer::DiagnosticsTick(float DeltaTime)
+{
+	if (!bDiagnosticsRunning)
+	{
+		return false; // Unregister ticker
+	}
+
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld() || !GEngine)
+	{
+		return true; // Keep ticker alive in case world recovers
+	}
+
+	// 1. Engine & Frame Timings
+	const float DeltaSeconds = FApp::GetDeltaTime();
+	const float InstantFps = (DeltaSeconds > 0.0f) ? (1.0f / DeltaSeconds) : 0.0f;
+	const float FrameMs = DeltaSeconds * 1000.0f;
+	const float IdleMs = FApp::GetIdleTime() * 1000.0f;
+	const float WorkMs = FMath::Max(0.0f, FrameMs - IdleMs);
+
+	// 2. Memory Stats
+	const FPlatformMemoryStats MemStats = FPlatformMemory::GetStats();
+	const double PhysicalRamMb = static_cast<double>(MemStats.UsedPhysical) / (1024.0 * 1024.0);
+	const double PeakRamMb = static_cast<double>(MemStats.PeakUsedPhysical) / (1024.0 * 1024.0);
+
+	// 3. Subsystem Metrics
+	UVoxelWorldSubsystem* Subsystem = World->GetSubsystem<UVoxelWorldSubsystem>();
+	UVoxelStreamingManager* StreamingManager = World->GetSubsystem<UVoxelStreamingManager>();
+
+	const int32 ChunkSizeLocal = Subsystem ? Subsystem->GetChunkSize() : ChunkSize;
+	const int32 ManagedCount = StreamingManager ? StreamingManager->GetManagedChunkCount() : 0;
+	const int32 ReadyCount = Subsystem ? Subsystem->GetReadyChunkCount() : 0;
+	const int32 PendingRequests = StreamingManager ? StreamingManager->GetPendingRequestCount() : 0;
+	const int32 PendingUnloads = StreamingManager ? StreamingManager->GetPendingUnloadCount() : 0;
+	const float LastStreamingTickMs = StreamingManager ? StreamingManager->GetLastTickBudgetUsedMs() : 0.0f;
+
+	const UVoxelRuntimeSettings* RuntimeSettings = GetDefault<UVoxelRuntimeSettings>();
+	const float StreamingBudgetLimitMs = RuntimeSettings ? RuntimeSettings->StreamingBudgetMs : 1.5f;
+
+	// Raw Voxel Memory: ManagedChunks * ChunkSize^3 * 2 bytes (FVoxelBlockId = uint16)
+	const double RawVoxelMemoryMb = static_cast<double>(ManagedCount) * (ChunkSizeLocal * ChunkSizeLocal * ChunkSizeLocal * 2) / (1024.0 * 1024.0);
+
+	// 4. Color Evaluation
+	const FColor ColorGreen(50, 230, 50);
+	const FColor ColorYellow(240, 210, 40);
+	const FColor ColorRed(240, 50, 50);
+	const FColor ColorCyan(60, 200, 255);
+	const FColor ColorWhite(230, 230, 230);
+
+	auto GetFpsColor = [&](float InFps) -> FColor
+	{
+		if (InFps >= 30.0f) return ColorGreen;
+		if (InFps >= 25.0f) return ColorYellow;
+		return ColorRed;
+	};
+
+	auto GetFrameTimeColor = [&](float InMs) -> FColor
+	{
+		if (InMs <= 33.33f) return ColorGreen;  // 30+ FPS
+		if (InMs <= 40.0f)  return ColorYellow; // 25-30 FPS
+		return ColorRed;
+	};
+
+	auto GetStreamingColor = [&](float InMs, float BudgetMs) -> FColor
+	{
+		if (InMs <= BudgetMs) return ColorGreen;
+		if (InMs <= BudgetMs * 1.33f) return ColorYellow;
+		return ColorRed;
+	};
+
+	// 5. Draw On-Screen Debug Lines (0.3s display duration for smooth 10 Hz updates)
+	const float DisplayDuration = 0.3f;
+
+	// Line 0: Header
+	GEngine->AddOnScreenDebugMessage(
+		DiagnosticsKeyBase + 0, DisplayDuration, ColorCyan,
+		TEXT("[VOXEL FRAMEWORK: LIVE PERFORMANCE DIAGNOSTICS - 10 Hz]"));
+
+	// Line 1: FPS / Frame Interval
+	GEngine->AddOnScreenDebugMessage(
+		DiagnosticsKeyBase + 1, DisplayDuration, GetFpsColor(InstantFps),
+		FString::Printf(TEXT("  FPS (Frame Interval): %.1f fps (%.2f ms)  [Target >= 30 fps]"), InstantFps, FrameMs));
+
+	// Line 2: Frame Work vs Idle
+	GEngine->AddOnScreenDebugMessage(
+		DiagnosticsKeyBase + 2, DisplayDuration, GetFrameTimeColor(WorkMs),
+		FString::Printf(TEXT("  Frame Work: %.2f ms | Idle/Wait: %.2f ms | Total Delta: %.2f ms  [Mobile Target <= 33.3 ms]"), WorkMs, IdleMs, FrameMs));
+
+	// Line 3: Streaming Work vs Budget
+	GEngine->AddOnScreenDebugMessage(
+		DiagnosticsKeyBase + 3, DisplayDuration, GetStreamingColor(LastStreamingTickMs, StreamingBudgetLimitMs),
+		FString::Printf(TEXT("  Streaming Tick: %.2f ms / Budget: %.2f ms | Queue: %d Req, %d Unload"), LastStreamingTickMs, StreamingBudgetLimitMs, PendingRequests, PendingUnloads));
+
+	// Line 4: Chunk Resident Status
+	GEngine->AddOnScreenDebugMessage(
+		DiagnosticsKeyBase + 4, DisplayDuration, ColorWhite,
+		FString::Printf(TEXT("  Chunks: %d Managed | %d Ready (Meshed & Resident)"), ManagedCount, ReadyCount));
+
+	// Line 5: Memory Usage
+	GEngine->AddOnScreenDebugMessage(
+		DiagnosticsKeyBase + 5, DisplayDuration, ColorWhite,
+		FString::Printf(TEXT("  Raw Voxel Memory (Array Only): %.2f MB | Physical RAM: %.1f MB (Peak: %.1f MB)"), RawVoxelMemoryMb, PhysicalRamMb, PeakRamMb));
+
+	// Line 6: Overall Mobile Status
+	const bool bPassingMobile = (InstantFps >= 30.0f) && (WorkMs <= 33.33f) && (LastStreamingTickMs <= StreamingBudgetLimitMs);
+	GEngine->AddOnScreenDebugMessage(
+		DiagnosticsKeyBase + 6, DisplayDuration, bPassingMobile ? ColorGreen : ColorYellow,
+		FString::Printf(TEXT("  Overall Mobile Budget Status: %s"), bPassingMobile ? TEXT("PASS (Within Mobile Targets)") : TEXT("WARN / REVIEW (Check Timings Above)")));
+
+	return true; // Keep ticking
+}
+

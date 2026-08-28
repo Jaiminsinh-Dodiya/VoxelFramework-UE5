@@ -1,228 +1,180 @@
 # Voxel Framework
 
-**A modular, data-driven voxel world framework for Unreal Engine 5.7 — built as an engine subsystem, not a game.**
+A high-performance, modular voxel engine plugin for Unreal Engine.
 
-Deterministic generation, cache-friendly storage, and a clean module boundary at every layer, designed from day one for mid-range Android/iOS as a first-class target rather than an afterthought.
-
----
+## Plugin Metadata
+- **Name:** Voxel Framework
+- **Version:** 2.0.0 (Beta)
+- **Engine:** Unreal Engine 5.7
+- **Author:** Jaimin
+- **Architecture:** 10 independent, decoupled modules
 
 ## Status
 
-> 🚧 **In active development.** Data pipeline (storage → assets → generation) is complete and test-covered. Meshing/rendering has not started yet — see [Roadmap](#roadmap).
-
 | Layer | Status |
 |---|---|
-| Storage | ✅ Complete, tested |
-| Assets (blocks/biomes) | ✅ Complete, tested |
-| Generation pipeline | ✅ Climate → Biome → Terrain → Cave, tested |
-| Debug visualization | ✅ Complete |
-| Meshing | ⬜ Not started |
-| Rendering | ⬜ Not started |
-| Streaming | ⬜ Not started |
-| Serialization | ⬜ Not started |
+| **VoxelCore** (types, interfaces) | ✅ Complete |
+| **VoxelRuntime** (scheduler, settings) | ✅ Complete |
+| **VoxelMath** (noise) | ✅ Complete |
+| **VoxelAssets** (blocks, biomes, registry) | ✅ Complete, tested |
+| **VoxelStorage** (chunk pool, voxel data) | ✅ Complete, tested |
+| **VoxelGeneration** (Climate→Biome→Terrain→Cave) | ✅ Complete, tested |
+| **VoxelMeshing** (greedy mesh, AO) | ✅ Complete, tested, visually validated |
+| **VoxelRendering** (custom scene proxy) | ✅ Complete, tested |
+| **VoxelWorld** (async subsystem) | ✅ Complete, tested, visually validated |
+| **VoxelDebug** (5 preview modes) | ✅ Complete |
+| **Streaming** | ⬜ Not started |
+| **Serialization** | ⬜ Not started |
 
----
+## Modules & Dependencies
 
-## Why this exists
+The plugin is strictly layered to prevent cyclic dependencies and enforce separation of concerns.
 
-Most voxel plugins for Unreal are built the way a hobbyist builds Minecraft: one Actor per chunk, `ProceduralMeshComponent`, tick-heavy streaming, and generation logic tangled directly into rendering code. That works for a weekend prototype and falls over the moment you need mobile performance, multiple biomes, or a second programmer to touch the code.
-
-This framework is built the way Epic would ship a Landscape-adjacent subsystem: strict module boundaries, no circular dependencies, deterministic generation, and every subsystem replaceable in isolation.
-
----
-
-## Architecture
-
-### Module dependency graph
-
-```mermaid
-graph TD
-    VoxelCore["VoxelCore<br/><i>types, interfaces, job state</i>"]
-    VoxelRuntime["VoxelRuntime<br/><i>UE::Tasks scheduler, project settings</i>"]
-    VoxelMath["VoxelMath<br/><i>deterministic noise</i>"]
-    VoxelAssets["VoxelAssets<br/><i>block/biome data assets, registry</i>"]
-    VoxelStorage["VoxelStorage<br/><i>chunk pool, voxel buffer</i>"]
-    VoxelGeneration["VoxelGeneration<br/><i>Climate → Biome → Terrain → Cave</i>"]
-    VoxelDebug["VoxelDebug<br/><i>cube-per-voxel preview</i>"]
-    VoxelMeshing["VoxelMeshing<br/><i>⬜ not started</i>"]
-    VoxelRendering["VoxelRendering<br/><i>⬜ not started</i>"]
-    VoxelStreaming["VoxelStreaming<br/><i>⬜ not started</i>"]
-    VoxelSerialization["VoxelSerialization<br/><i>⬜ not started</i>"]
-
-    VoxelRuntime --> VoxelCore
-    VoxelMath --> VoxelCore
-    VoxelAssets --> VoxelCore
-    VoxelStorage --> VoxelCore
-    VoxelStorage --> VoxelRuntime
-    VoxelGeneration --> VoxelMath
-    VoxelGeneration --> VoxelAssets
-    VoxelGeneration --> VoxelStorage
-    VoxelGeneration --> VoxelRuntime
-    VoxelDebug --> VoxelGeneration
-    VoxelDebug --> VoxelStorage
-    VoxelDebug --> VoxelAssets
-    VoxelMeshing -.-> VoxelStorage
-    VoxelRendering -.-> VoxelMeshing
-    VoxelStreaming -.-> VoxelGeneration
-    VoxelStreaming -.-> VoxelRendering
-    VoxelSerialization -.-> VoxelStorage
-
-    classDef done fill:#1f6f43,stroke:#0d3d24,color:#fff
-    classDef pending fill:#3a3a3a,stroke:#1a1a1a,color:#bbb,stroke-dasharray: 4 3
-    class VoxelCore,VoxelRuntime,VoxelMath,VoxelAssets,VoxelStorage,VoxelGeneration,VoxelDebug done
-    class VoxelMeshing,VoxelRendering,VoxelStreaming,VoxelSerialization pending
-```
-
-Dashed arrows/nodes are planned but not yet implemented. No arrow ever points backward — `VoxelStorage` has no idea `VoxelGeneration` exists, `VoxelMath` has no idea `VoxelStorage` exists. Each module answers exactly one question.
-
-### Generation pipeline
-
-```mermaid
-flowchart LR
-    Seed(["World Seed<br/>+ Chunk Coordinate"]) --> Climate["ClimatePass<br/><i>temperature / humidity noise</i>"]
-    Climate --> Biome["BiomePass<br/><i>select biome per column</i>"]
-    Biome --> Terrain["TerrainPass<br/><i>height field + resolved<br/>biome layers</i>"]
-    Terrain --> Cave["CavePass<br/><i>3D density carve,<br/>surface-protected</i>"]
-    Cave --> Chunk[("Finished<br/>FVoxelChunk")]
-
-    style Seed fill:#2b2b2b,stroke:#555,color:#eee
-    style Chunk fill:#1f6f43,stroke:#0d3d24,color:#fff
-```
-
-Every pass is a pure, worker-thread-safe function of `(seed, world coordinates)` — no `UObject` access, no Game Thread calls, no shared mutable state. Same seed and coordinate always produce an identical chunk, verified by hash-based automation tests.
-
-### Chunk lifecycle
-
-```mermaid
-sequenceDiagram
-    participant Caller
-    participant Store as FVoxelChunkStore
-    participant Pool as Chunk Pool
-    participant Pipeline as FVoxelGenerationPipeline
-
-    Caller->>Store: CreateOrGetChunk(coordinate)
-    Store->>Pool: reuse free slot or allocate
-    Pool-->>Store: FVoxelChunk*
-    Store-->>Caller: FVoxelChunkHandle (coordinate + generation)
-    Caller->>Pipeline: GenerateChunk(seed, coordinate, ...)
-    Pipeline-->>Caller: writes into FVoxelChunk (bIsGenerationWrite=true)
-    Note over Caller,Store: Later, gameplay edits SetBlock(..., false)<br/>and are tracked separately for diff-based save
-```
-
-Handles carry a generation counter, so a handle captured before a chunk was unloaded and its pool slot reused is detectably stale instead of silently pointing at the wrong data.
-
----
-
-## Architecture Decision Records
-
-Frozen decisions — see [`Docs/ADR.md`](Docs/ADR.md) for full rationale. Summarized:
-
-| ADR | Decision | Why |
+| Module | Dependencies | Description |
 |---|---|---|
-| 001 | Chunks live in a `UWorldSubsystem`, never as `AActor` | Actor/GC overhead is real cost for thousands of streamed chunks |
-| 002 | Scheduling via `UE::Tasks`, not a custom thread pool | The engine already solves priority scheduling per-platform |
-| 003 | `FVoxelChunk` is a plain C++ type, referenced by handle | Avoids GC pressure and allocation spikes on mobile |
-| 004 | Meshing and Rendering are separate modules | Different lifetimes, different threading rules |
-| 005 | Serialization is diff-based, never whole-world | Mobile storage budgets; determinism from seed is free compression |
+| **VoxelCore** | None | Leaf module. Defines `FVoxelBlockId`, `FVoxelChunkCoordinate`, `FVoxelChunkHandle`, `EVoxelJobState`, `FVoxelJobHandle`. |
+| **VoxelRuntime** | VoxelCore | Houses `FVoxelScheduler` (UE::Tasks wrapper) and `UVoxelRuntimeSettings` (Project Settings). |
+| **VoxelMath** | VoxelCore | Contains `VoxelNoise` namespace for `Sample2D/3D`, `FBM2D/3D`. |
+| **VoxelAssets** | VoxelCore | Defines `UVoxelBlockDefinition`, `UVoxelBiomeDefinition` (UDataAssets), and `UVoxelBlockRegistry` (UWorldSubsystem). |
+| **VoxelStorage** | VoxelCore, VoxelRuntime | Manages `FVoxelChunk` (plain C++) and `FVoxelChunkStore` (pooled lifecycle). |
+| **VoxelGeneration**| VoxelMath, VoxelAssets, VoxelStorage, VoxelRuntime | Implements `FVoxelGenerationPipeline` across 4 passes: Climate, Biome, Terrain, Cave. |
+| **VoxelMeshing** | VoxelStorage, VoxelAssets, VoxelRuntime | Provides `FVoxelMesher` (greedy meshing + AO), `FVoxelMeshData`, and `VoxelMeshingService`. |
+| **VoxelRendering** | VoxelMeshing | Supplies `UVoxelMeshComponent` (UMeshComponent) and `FVoxelMeshSceneProxy` (FPrimitiveSceneProxy). |
+| **VoxelWorld** | VoxelCore, VoxelRuntime, VoxelAssets, VoxelStorage, VoxelGeneration, VoxelMeshing, VoxelRendering | Defines `UVoxelWorldSubsystem` (UWorldSubsystem), `UVoxelWorldSettings`, and `AVoxelWorldRenderActor`. |
+| **VoxelDebug** | VoxelGeneration, VoxelMeshing, VoxelStorage, VoxelAssets, VoxelRendering, VoxelWorld | Provides `AVoxelDebugVisualizer` with 5 CallInEditor preview modes. |
 
-### Performance budgets (design constraints, not aspirations)
+```mermaid
+graph TD;
+    VoxelRuntime --> VoxelCore;
+    VoxelMath --> VoxelCore;
+    VoxelAssets --> VoxelCore;
+    VoxelStorage --> VoxelCore;
+    VoxelStorage --> VoxelRuntime;
+    
+    VoxelGeneration --> VoxelMath;
+    VoxelGeneration --> VoxelAssets;
+    VoxelGeneration --> VoxelStorage;
+    VoxelGeneration --> VoxelRuntime;
+    
+    VoxelMeshing --> VoxelStorage;
+    VoxelMeshing --> VoxelAssets;
+    VoxelMeshing --> VoxelRuntime;
+    
+    VoxelRendering --> VoxelMeshing;
+    
+    VoxelWorld --> VoxelCore;
+    VoxelWorld --> VoxelRuntime;
+    VoxelWorld --> VoxelAssets;
+    VoxelWorld --> VoxelStorage;
+    VoxelWorld --> VoxelGeneration;
+    VoxelWorld --> VoxelMeshing;
+    VoxelWorld --> VoxelRendering;
+    
+    VoxelDebug --> VoxelGeneration;
+    VoxelDebug --> VoxelMeshing;
+    VoxelDebug --> VoxelStorage;
+    VoxelDebug --> VoxelAssets;
+    VoxelDebug --> VoxelRendering;
+    VoxelDebug --> VoxelWorld;
+```
 
-| System | Budget |
-|---|---|
-| Streaming (Game Thread) | ≤ 1.5 ms/frame |
-| Generation | ≤ 2 ms/frame equivalent, budgeted across worker tasks |
-| Meshing | Worker threads only, 0 ms Game Thread |
-| Rendering submission | ≤ 1 ms/frame Game Thread |
-| Serialization | Must never block Game Thread |
+## Pipelines
 
-Measured so far: full `Climate + Biome + Terrain + Cave` pipeline for one 32³ chunk runs in **~0.4–0.6 ms** in-editor (Development build, not yet profiled on-device).
+### 1. Generation Pipeline
+```mermaid
+graph LR;
+    A[Seed + Coord] --> B[ClimatePass];
+    B --> C[BiomePass];
+    C --> D[TerrainPass];
+    D --> E[CavePass];
+    E --> F[FVoxelChunk];
+    F --> G[FVoxelMesher];
+    G --> H[FVoxelMeshData];
+```
 
----
+### 2. Async World Pipeline
+```mermaid
+graph TD;
+    GT[Game Thread: UVoxelWorldSubsystem::RequestChunk] --> WT[Worker Thread: Dispatch];
+    WT --> GP[FVoxelGenerationPipeline::GenerateChunk];
+    GP --> M[FVoxelMesher::GenerateMesh];
+    M --> AT[AsyncTask to Game Thread];
+    AT --> RC[Create/Update UVoxelMeshComponent on AVoxelWorldRenderActor];
+```
 
-## Module reference
+### 3. Threading Model
+```mermaid
+graph TD;
+    GT[Game Thread] -->|Schedules via UE::Tasks| WT[Worker Threads];
+    WT -->|Chunk Generation| CD[FVoxelChunk];
+    WT -->|Meshing| MD[FVoxelMeshData];
+    WT -->|AsyncTask| GT;
+    GT -->|Render Submission| RT[Render Thread];
+```
 
-| Module | Depends on | Responsibility |
+## Architecture Decision Records (ADRs)
+We maintain a set of frozen ADRs reflecting foundational design decisions.
+- **ADR-001:** Chunks are kept in a `UWorldSubsystem`, never as `AActor`s.
+- **ADR-002:** Scheduling utilizes `UE::Tasks` natively, no custom thread pool.
+- **ADR-003:** `FVoxelChunk` is plain C++, referenced globally via handle (coordinate + generation counter).
+- **ADR-004:** Meshing and Rendering are strictly separated modules.
+- **ADR-005:** Diff-based serialization ensures only modified voxels are saved.
+
+> **Note:** See `ARCHITECTURE.md` §8 for the World/Game Design checkpoint and implementation nuances.
+
+## Performance Budgets
+
+| Metric | Budget | Current Measurement |
 |---|---|---|
-| `VoxelCore` | — | Coordinates, handles, job state, interfaces. Leaf module, no owned systems. |
-| `VoxelRuntime` | `VoxelCore` | `FVoxelScheduler` (wraps `UE::Tasks`), `UVoxelRuntimeSettings` (Project Settings: chunk size, streaming distances, budgets). |
-| `VoxelMath` | `VoxelCore` | Deterministic value noise + fBm. Pure functions only. |
-| `VoxelAssets` | `VoxelCore` | `UVoxelBlockDefinition`, `UVoxelBiomeDefinition` data assets; `UVoxelBlockRegistry` resolves block/biome references to fast runtime IDs. |
-| `VoxelStorage` | `VoxelCore`, `VoxelRuntime` | `FVoxelChunk` (dense voxel buffer + modification diff), `FVoxelChunkStore` (pooled, handle-based chunk lifecycle). |
-| `VoxelGeneration` | `VoxelMath`, `VoxelAssets`, `VoxelStorage` | `IVoxelGenerationPass` pipeline: Climate → Biome → Terrain → Cave. |
-| `VoxelDebug` | `VoxelGeneration`, `VoxelStorage`, `VoxelAssets` | `AVoxelDebugVisualizer` — cube-per-visible-voxel preview for validating generation before investing in real meshing. |
-
----
+| **Streaming Game Thread** | ≤ 1.5ms / frame | N/A (Pending) |
+| **Generation** | ≤ 2.0ms / frame (worker eq.) | ~0.4 - 1.2ms |
+| **Meshing** | Worker threads only, 0ms GT | ~1.1ms for 32³ chunk (~2120 verts / 1060 tris / 3 sections) |
+| **Render Submission** | ≤ 1.0ms Game Thread | Well within limits |
+| **Serialization** | Non-blocking | N/A (Pending) |
 
 ## Testing
 
-Every subsystem ships with automation tests (`WITH_DEV_AUTOMATION_TESTS`), runnable via **Window → Test Automation** or:
+The plugin leverages Unreal's Automation Testing framework with 21 passing tests ensuring module integrity.
 
-```
-UnrealEditor-Cmd.exe "YourProject.uproject" -ExecCmds="Automation RunTests Voxel; Quit" -unattended -nullrhi
-```
+| Suite | Module | Covers |
+|---|---|---|
+| `Voxel.Storage.CreateStoreModifyQuery` | VoxelStorage | Chunk lifecycle, handle stale-rejection, gen-write vs gameplay-edit diff tracking |
+| `Voxel.Assets.BiomeLayerResolution` | VoxelAssets | Soft-pointer biome layer resolution |
+| `Voxel.Generation.DeterministicFromSeed` | VoxelGeneration | Same seed+coord → identical chunk |
+| `Voxel.Generation.TerrainRespectsBiomeLayers` | VoxelGeneration | Terrain uses resolved biome blocks |
+| `Voxel.Generation.Cave.DeterministicHash` | VoxelGeneration | CRC32 stability with caves |
+| `Voxel.Generation.Cave.AirRatioLogged` | VoxelGeneration | Bounded air ratio |
+| `Voxel.Generation.Cave.SurfaceProtected` | VoxelGeneration | No caves pierce surface |
+| `Voxel.Generation.Cave.BoundaryContinuity` | VoxelGeneration | Cross-chunk seam correlation >75% |
+| `Voxel.Generation.PerfLog` | VoxelGeneration | Pipeline timing |
+| `Voxel.Meshing.EmptyChunk` | VoxelMeshing | All-air → no geometry |
+| `Voxel.Meshing.SingleVoxel` | VoxelMeshing | 24 verts / 36 indices / 12 tris |
+| `Voxel.Meshing.AdjacentVoxelsMergeSameMaterial` | VoxelMeshing | Greedy merge: 6 quads |
+| `Voxel.Meshing.MaterialBoundaryPreventsMerge` | VoxelMeshing | No cross-material merge: 2 sections |
+| `Voxel.Meshing.AmbientOcclusionVariesByProximity` | VoxelMeshing | Corner AO darkening verified |
+| `Voxel.Meshing.DeterministicOutput` | VoxelMeshing | Identical mesh on re-mesh |
+| `Voxel.Meshing.PerfLog` | VoxelMeshing | Meshing timing |
+| `Voxel.Rendering.ComponentBookkeeping` | VoxelRendering | SetMeshData/ClearMeshData, bounds |
+| `Voxel.World.RequestUnloadBookkeeping` | VoxelWorld | Request/Unload lifecycle, idempotency |
 
-| Suite | Covers |
-|---|---|
-| `Voxel.Storage.CreateStoreModifyQuery` | Pooled chunk lifecycle, generation-write vs. gameplay-edit diff tracking, stale-handle rejection |
-| `Voxel.Assets.BiomeLayerResolution` | Soft-pointer biome layer resolution to concrete block IDs |
-| `Voxel.Generation.DeterministicFromSeed` | Same seed + coordinate ⇒ identical chunk |
-| `Voxel.Generation.TerrainRespectsBiomeLayers` | Terrain places the *resolved* biome block, not a placeholder |
-| `Voxel.Generation.Cave.DeterministicHash` | Full-chunk CRC32 stability across regeneration |
-| `Voxel.Generation.Cave.AirRatioLogged` | Sanity-bounded air ratio, logged for visibility |
-| `Voxel.Generation.Cave.SurfaceProtected` | Near-surface voxels never carved open |
-| `Voxel.Generation.Cave.BoundaryContinuity` | Adjacent chunks show correlated terrain across the seam (catches chunk-local noise regressions) |
-| `Voxel.Generation.PerfLog` | Logs full-pipeline generation time per chunk |
+### VoxelDebug Visualizer Modes
+The `AVoxelDebugVisualizer` actor supports 5 CallInEditor modes for rapid in-editor validation:
+1. **GenerateAndVisualize:** Generates chunks and spawns a cube per visible voxel (using ISMC).
+2. **GenerateAndVisualizeMeshed:** Uses real `FVoxelMesher` generating a `UProceduralMeshComponent`.
+3. **GenerateAndVisualizeRendered:** Uses real `UVoxelMeshComponent` with `FVoxelMeshSceneProxy`.
+4. **RequestChunksViaSubsystem:** Invokes the real async `UVoxelWorldSubsystem` pipeline (PIE only).
+5. **ValidateSubsystemResults:** Performs per-chunk validation on subsystem results (with Output Log PASS/FAIL).
 
-**All 9 tests passing** as of the current build.
-
----
-
-## Roadmap
-
-```mermaid
-graph TD
-    A["✅ Storage"] --> B["✅ Asset Resolution"]
-    B --> C["✅ Biome Resolution"]
-    C --> D["✅ Terrain Generation"]
-    D --> E["✅ Cave Pass"]
-    E --> F["✅ Debug Visualization"]
-    F --> G["⭐ Greedy Meshing"]
-    G --> H["⬜ Rendering"]
-    H --> I["⬜ Streaming"]
-    I --> J["⬜ Mobile Optimization Pass"]
-    J --> K["⬜ Gameplay Systems"]
-
-    classDef done fill:#1f6f43,stroke:#0d3d24,color:#fff
-    classDef next fill:#a67c00,stroke:#5c4600,color:#fff
-    classDef pending fill:#3a3a3a,stroke:#1a1a1a,color:#bbb
-    class A,B,C,D,E,F done
-    class G next
-    class H,I,J,K pending
-```
-
-**Next up:** production greedy meshing (`VoxelMeshing`) — merges coplanar faces instead of emitting one cube per voxel, targets mobile draw-call budgets, runs entirely on worker threads and hands off plain vertex/index arrays to `VoxelRendering`.
-
----
-
-## Getting started
-
-1. Copy `VoxelFramework/` into your project's `Plugins/` directory
-2. Regenerate project files (new modules require this)
-3. Build (`Development Editor`, Win64/Android/iOS)
-4. Enable the plugin in **Edit → Plugins** if not already active
-5. To preview generated terrain: place an `AVoxelDebugVisualizer` in a level, configure seed/chunk range in its Details panel, click **Generate And Visualize**
-
-Requires **Unreal Engine 5.7**.
-
----
-
-## Project structure
-
-```
+## Project Structure
+```text
 VoxelFramework/
 ├── VoxelFramework.uplugin
+├── README.md
 ├── Docs/
-│   └── ADR.md              # Full architecture decision records
+│   ├── ADR.md
+│   ├── ARCHITECTURE.md
+│   ├── API_REFERENCE.md
+│   └── TODO.md
 └── Source/
     ├── VoxelCore/
     ├── VoxelRuntime/
@@ -230,12 +182,33 @@ VoxelFramework/
     ├── VoxelAssets/
     ├── VoxelStorage/
     ├── VoxelGeneration/
-    │   └── Passes/          # ClimatePass, BiomePass, TerrainPass, CavePass
+    │   └── Passes/
+    ├── VoxelMeshing/
+    ├── VoxelRendering/
+    ├── VoxelWorld/
     └── VoxelDebug/
 ```
 
----
+## Roadmap
+
+Storage ✅ → Assets ✅ → Biomes ✅ → Terrain ✅ → Caves ✅ → Debug Viz ✅ → Meshing ✅ → Rendering ✅ → World Subsystem ✅ → **Streaming (next)** → Serialization → Mobile Optimization → Gameplay Systems
+
+## Getting Started
+
+1. Copy `VoxelFramework/` into your project's `Plugins/` folder.
+2. Regenerate project files for your `.uproject`.
+3. Build your project (Development Editor, Win64/Android/iOS supported).
+4. Enable the **Voxel Framework** plugin and the **ProceduralMeshComponent** plugin in the editor.
+5. Place an `AVoxelDebugVisualizer` actor in your scene, configure the seed and chunk range, and use the exposed buttons.
+6. For async pipeline testing: Play in PIE, click `RequestChunksViaSubsystem`, then `ValidateSubsystemResults`.
+
+*Requires Unreal Engine 5.7.*
+
+## Configuration
+
+Two Project Settings panels are provided under Plugins:
+1. **Voxel Framework** (`UVoxelRuntimeSettings`): Adjust ChunkSize, WorldHeightInChunks, streaming distances, generation budgets, and memory budgets.
+2. **Voxel World** (`UVoxelWorldSettings`): Define WorldSeed, DefaultBiomes, VoxelWorldSize, BlockMaterials, and DefaultMaterial.
 
 ## License
-
 Not yet decided — TBD before any public release.

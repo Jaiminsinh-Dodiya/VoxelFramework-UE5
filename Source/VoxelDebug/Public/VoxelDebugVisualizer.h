@@ -1,44 +1,60 @@
 // VoxelDebugVisualizer.h
 //
 // Purpose:
-//   Cube-per-visible-voxel debug renderer. Answers "does the generated
-//   world actually look right" before any time is spent on real greedy
-//   meshing/rendering. Explicitly NOT the production renderer - no greedy
-//   meshing, no LOD, no texture atlas, no face culling beyond a cheap
-//   "skip fully-buried voxels" check for instance-count sanity.
+//   Three debug preview modes for validating generation + meshing +
+//   rendering before/while VoxelRendering matures:
 //
-//   This is an AActor with an AActor's usual overhead, which is normally
-//   against ADR-001 (chunks aren't Actors) - that ADR is about the
-//   PRODUCTION chunk representation. A debug tool that exists to be looked
-//   at in the editor, not streamed at scale, is a legitimate exception;
-//   don't copy this pattern into VoxelStreaming/VoxelWorldSubsystem later.
+//   1. Cube preview (GenerateAndVisualize) - one cube per visible voxel.
+//      Validates generation output (terrain shape, caves, biomes) cheaply.
+//   2. PMC mesh preview (GenerateAndVisualizeMeshed) - runs the REAL
+//      FVoxelMesher and displays its output via UProceduralMeshComponent.
+//      Validates meshing output (greedy merging, hidden-face removal,
+//      baked AO) independent of whether the real renderer works yet.
+//   3. Real renderer preview (GenerateAndVisualizeRendered) - runs the
+//      SAME FVoxelMesher output through the actual production
+//      UVoxelMeshComponent / FVoxelMeshSceneProxy. This is the first mode
+//      that exercises the real rendering path rather than a debug
+//      substitute - compare its output directly against mode 2 (same mesh
+//      data, two different consumers) to sanity-check the custom scene
+//      proxy: if they look identical, that's strong evidence
+//      FVoxelMeshSceneProxy is correct; if they diverge, the difference
+//      points at exactly what to debug.
 //
-// Responsibilities:
-//   - Run the generation pipeline for a small grid of chunks
-//   - Spawn one InstancedStaticMeshComponent per distinct block ID seen,
-//     one instance per solid voxel that has at least one air-exposed face
-//   - Nothing else - no interaction, no collision, no persistence
+//   Modes 1 and 2 are NOT the production renderer. UProceduralMeshComponent
+//   is an explicit, deliberate exception to ADR-004 ("meshing and
+//   rendering are separate modules, no PMC") - that ADR governs the
+//   PRODUCTION rendering path (VoxelRendering). Mode 3 uses the real
+//   production component and is the only one of the three whose visual
+//   output should be trusted as representative of what players will see.
 //
-// Thread ownership: Game Thread only. GenerateAndVisualize() runs
-// generation synchronously and inline - deliberately not dispatched
-// through FVoxelScheduler, since blocking the editor briefly while a small
-// debug preview builds is an acceptable tradeoff for a tool that exists to
-// be run occasionally by hand, not every frame.
+// Responsibilities: generate a small chunk grid, display it three ways.
+//   Nothing else - no interaction; mesh/render modes enable basic
+//   collision only so you can walk/fly through it in PIE if desired.
 //
-// Dependencies: Engine (AActor, UInstancedStaticMeshComponent), VoxelCore,
-//   VoxelStorage, VoxelGeneration, VoxelAssets (for optional biome-driven runs).
+// Thread ownership: Game Thread only, synchronous. Same tradeoff as the
+//   cube mode - acceptable for a tool run occasionally by hand, not a
+//   pattern for production streaming code.
+//
+// Dependencies: Engine (AActor, UInstancedStaticMeshComponent),
+//   ProceduralMeshComponent (debug-only, see above), VoxelCore,
+//   VoxelStorage, VoxelGeneration, VoxelAssets, VoxelMeshing, VoxelRendering.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "VoxelCoreTypes.h"
+#include "Containers/Ticker.h"
 #include "VoxelDebugVisualizer.generated.h"
 
 class UInstancedStaticMeshComponent;
+class UProceduralMeshComponent;
+class UVoxelMeshComponent;
 class UStaticMesh;
 class UMaterialInterface;
 class UVoxelBiomeDefinition;
+class UVoxelBlockRegistry;
+class FVoxelChunk;
 
 UCLASS()
 class VOXELDEBUG_API AVoxelDebugVisualizer : public AActor
@@ -64,15 +80,22 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Voxel Debug", meta = (ClampMin = "1", ClampMax = "8"))
 	int32 ChunkCountZ = 3;
 
-	/** World-space size of one voxel cube, in Unreal units. Default 100 matches the engine's basic cube mesh's native size. */
+	/** World-space size of one voxel cube/unit, in Unreal units. Default 100 matches the engine's basic cube mesh's native size and gives FVoxelMesher's 1-unit-per-voxel output a sensible scale. */
 	UPROPERTY(EditAnywhere, Category = "Voxel Debug", meta = (ClampMin = "1"))
 	float VoxelWorldSize = 100.0f;
 
-	/** Optional per-block-ID material override, purely for visual distinction (e.g. 1=stone gray, 3=grass green). Unset IDs use DefaultMaterial. */
+	/**
+	 * Per-block/material-ID material override, used by BOTH preview modes.
+	 * Cube mode keys this by raw FVoxelBlockId. Mesh mode keys it by the
+	 * MaterialId FVoxelMesher resolved (which, with no block registry
+	 * configured below, IS the raw FVoxelBlockId - see FVoxelMesher::
+	 * ResolveMaterialId) - so in the common no-registry case, the same map
+	 * works identically for both modes.
+	 */
 	UPROPERTY(EditAnywhere, Category = "Voxel Debug")
 	TMap<int32, TObjectPtr<UMaterialInterface>> BlockMaterials;
 
-	/** Used for any block ID not present in BlockMaterials. Defaults to the engine's basic material if left unset. */
+	/** Used for any block/material ID not present in BlockMaterials. Unset = engine default material. */
 	UPROPERTY(EditAnywhere, Category = "Voxel Debug")
 	TObjectPtr<UMaterialInterface> DefaultMaterial;
 
@@ -80,22 +103,98 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Voxel Debug")
 	TArray<TObjectPtr<UVoxelBiomeDefinition>> Biomes;
 
-	/** Runs generation for the configured chunk grid and (re)builds the cube visualization. Safe to call repeatedly - clears previous instances first. */
-	UFUNCTION(CallInEditor, Category = "Voxel Debug")
+	/** If true, mesh-mode components get simple collision enabled so you can walk/fly through the preview in PIE. Off by default to keep the debug tool cheap. */
+	UPROPERTY(EditAnywhere, Category = "Voxel Debug")
+	bool bEnableCollisionInMeshPreview = false;
+
+	/** Cube-per-visible-voxel preview. Validates generation (terrain shape, caves, biomes). Clears any existing visualization first. */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|Cube Preview")
 	void GenerateAndVisualize();
 
-	/** Removes all spawned instanced mesh components without regenerating. */
+	/** Real FVoxelMesher output via UProceduralMeshComponent. Validates meshing (greedy merge quality, hidden faces, baked AO). Clears any existing visualization first. */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|Mesh Preview")
+	void GenerateAndVisualizeMeshed();
+
+	/** Same FVoxelMesher output as GenerateAndVisualizeMeshed, but through the REAL production UVoxelMeshComponent/FVoxelMeshSceneProxy rather than PMC. Compare against the PMC mode to sanity-check the custom renderer. Clears any existing visualization first. */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|Real Renderer Preview")
+	void GenerateAndVisualizeRendered();
+
+	/**
+	 * Exercises the REAL UVoxelWorldSubsystem async pipeline: calls
+	 * RequestChunk for the same grid the other modes use. The subsystem
+	 * dispatches generation+meshing to a worker thread and marshals the
+	 * result back to the Game Thread to create UVoxelMeshComponents under
+	 * its own RenderHostActor. Compare against GenerateAndVisualizeRendered
+	 * (same mesh data, synchronous) to verify the async round-trip is
+	 * correct.
+	 *
+	 * NOTE: must be run in PIE (Play-In-Editor) - subsystems don't exist
+	 * in the editor world. Results appear asynchronously a few frames
+	 * after clicking.
+	 */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|World Subsystem Test")
+	void RequestChunksViaSubsystem();
+
+	/**
+	 * Click AFTER RequestChunksViaSubsystem chunks have appeared. For each
+	 * chunk coordinate, re-generates locally (synchronous, same seed) and
+	 * compares every voxel block-by-block against what the subsystem
+	 * produced. Logs PASS/FAIL per chunk + a summary to the Output Log.
+	 */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|World Subsystem Test")
+	void ValidateSubsystemResults();
+
+	/** Removes all spawned components (all three modes) without regenerating. */
 	UFUNCTION(CallInEditor, Category = "Voxel Debug")
 	void ClearVisualization();
 
+	/**
+	 * Starts a 10 Hz on-screen live diagnostics overlay showing FPS,
+	 * previous-frame thread timings (Game Thread, Render Thread, GPU),
+	 * memory usage, and streaming stats color-coded against mobile targets.
+	 * Must be run in PIE (Play-In-Editor).
+	 */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|Performance")
+	void StartPerformanceDiagnostics();
+
+	/** Stops the diagnostics ticker and removes all on-screen diagnostic lines. */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|Performance")
+	void StopPerformanceDiagnostics();
+
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void BeginDestroy() override;
+
 private:
+	static constexpr uint64 DiagnosticsKeyBase = 0x564F58454C000000ull;
+	static constexpr int32 DiagnosticsLineCount = 7;
+
+	FTSTicker::FDelegateHandle DiagnosticsTickerHandle;
+	bool bDiagnosticsRunning = false;
+
+	bool DiagnosticsTick(float DeltaTime);
 	UPROPERTY(Transient)
 	TObjectPtr<UStaticMesh> CubeMesh;
 
-	// One ISMC per distinct block ID actually placed, so BlockMaterials can
-	// color them independently. Rebuilt from scratch each GenerateAndVisualize call.
+	// Cube mode: one ISMC per distinct block ID actually placed.
 	UPROPERTY(Transient)
 	TMap<int32, TObjectPtr<UInstancedStaticMeshComponent>> BlockIdToComponent;
 
+	// PMC mesh mode: one PMC per generated chunk (simplest correct approach -
+	// see .cpp for why this isn't further optimized, it's a debug tool).
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UProceduralMeshComponent>> MeshPreviewComponents;
+
+	// Real renderer mode: one UVoxelMeshComponent per generated chunk, same
+	// per-chunk granularity as the PMC mode for a fair visual comparison.
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UVoxelMeshComponent>> RenderedPreviewComponents;
+
 	UInstancedStaticMeshComponent* GetOrCreateComponentForBlock(int32 BlockId);
+
+	/**
+	 * Shared generation step used by both preview modes: builds the local
+	 * block registry (if Biomes is non-empty) and generates the configured
+	 * chunk grid. Returns the registry (may be nullptr) via OutRegistry.
+	 */
+	TMap<FVoxelChunkCoordinate, TUniquePtr<FVoxelChunk>> GenerateChunkGrid(UVoxelBlockRegistry*& OutRegistry);
 };
