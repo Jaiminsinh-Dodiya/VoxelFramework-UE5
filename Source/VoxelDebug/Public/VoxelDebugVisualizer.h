@@ -44,6 +44,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "VoxelCoreTypes.h"
+#include "Containers/Ticker.h"
 #include "VoxelDebugVisualizer.generated.h"
 
 class UInstancedStaticMeshComponent;
@@ -147,7 +148,30 @@ public:
 	UFUNCTION(CallInEditor, Category = "Voxel Debug")
 	void ClearVisualization();
 
+	/**
+	 * Starts a 10 Hz on-screen live diagnostics overlay showing FPS,
+	 * previous-frame thread timings (Game Thread, Render Thread, GPU),
+	 * memory usage, and streaming stats color-coded against mobile targets.
+	 * Must be run in PIE (Play-In-Editor).
+	 */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|Performance")
+	void StartPerformanceDiagnostics();
+
+	/** Stops the diagnostics ticker and removes all on-screen diagnostic lines. */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|Performance")
+	void StopPerformanceDiagnostics();
+
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void BeginDestroy() override;
+
 private:
+	static constexpr uint64 DiagnosticsKeyBase = 0x564F58454C000000ull;
+	static constexpr int32 DiagnosticsLineCount = 7;
+
+	FTSTicker::FDelegateHandle DiagnosticsTickerHandle;
+	bool bDiagnosticsRunning = false;
+
+	bool DiagnosticsTick(float DeltaTime);
 	UPROPERTY(Transient)
 	TObjectPtr<UStaticMesh> CubeMesh;
 
