@@ -26,6 +26,7 @@ class VOXELRUNTIME_API UVoxelRuntimeSettings : public UDeveloperSettings
 	GENERATED_BODY()
 
 public:
+	virtual FName GetCategoryName() const override { return TEXT("Plugins"); }
 	/** Number of voxels along one edge of a chunk. Must be a power of two. */
 	UPROPERTY(EditAnywhere, Config, Category = "World", meta = (ClampMin = "8", ClampMax = "64"))
 	int32 ChunkSize = 32;
