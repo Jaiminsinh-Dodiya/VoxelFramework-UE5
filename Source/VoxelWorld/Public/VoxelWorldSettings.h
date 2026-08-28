@@ -31,6 +31,7 @@ class VOXELWORLD_API UVoxelWorldSettings : public UDeveloperSettings
 	GENERATED_BODY()
 
 public:
+	virtual FName GetCategoryName() const override { return TEXT("Plugins"); }
 	/** Passed to FVoxelGenerationPipeline for every chunk this subsystem requests. */
 	UPROPERTY(EditAnywhere, Config, Category = "World")
 	int32 WorldSeed = 1234;
