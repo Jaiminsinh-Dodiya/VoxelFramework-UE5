@@ -112,7 +112,7 @@ FVoxelChunkHandle UVoxelWorldSubsystem::RequestChunk(const FVoxelChunkCoordinate
 	// FVoxelScheduler's API needing to support returning a value directly.
 	TSharedRef<FVoxelMeshData, ESPMode::ThreadSafe> MeshDataResult = MakeShared<FVoxelMeshData, ESPMode::ThreadSafe>();
 
-	FVoxelRuntimeModule::Get().GetScheduler().Submit(
+	const FVoxelJobHandle JobHandle = FVoxelRuntimeModule::Get().GetScheduler().Submit(
 		[Chunk, CapturedSeed, Coordinate, CapturedChunkSize, CapturedRegistry, CapturedBiomes, MeshDataResult]()
 		{
 			// Worker thread. Both calls are documented worker-thread-safe,
@@ -140,12 +140,27 @@ FVoxelChunkHandle UVoxelWorldSubsystem::RequestChunk(const FVoxelChunkCoordinate
 			});
 		});
 
+	InFlightJobHandles.Add(Coordinate, JobHandle);
+
 	return ExistingHandle;
 }
 
 void UVoxelWorldSubsystem::OnChunkMeshReady(FVoxelChunkCoordinate Coordinate, FVoxelMeshData&& MeshData)
 {
 	check(IsInGameThread());
+
+	// Remove from in-flight tracking (job is done, regardless of outcome).
+	InFlightJobHandles.Remove(Coordinate);
+
+	// Guard against zombie chunks: if UnloadChunk was called while this job
+	// was running, RequestedCoordinates no longer contains this coordinate.
+	// RequestCancel only prevents Queued jobs from starting — a Running
+	// job's Work() completes normally and OnComplete still fires. This
+	// guard is the actual fix for that timing, not optional defense-in-depth.
+	if (!RequestedCoordinates.Contains(Coordinate))
+	{
+		return;
+	}
 
 	ReadyCoordinates.Add(Coordinate);
 
@@ -228,11 +243,15 @@ void UVoxelWorldSubsystem::UnloadChunk(const FVoxelChunkCoordinate& Coordinate)
 	ChunkStore->RemoveChunk(Coordinate);
 	RequestedCoordinates.Remove(Coordinate);
 	ReadyCoordinates.Remove(Coordinate);
-
-	// See class header: does not cancel an in-flight job for this
-	// coordinate. If one completes after this call, OnChunkMeshReady will
-	// run again for a coordinate that's no longer requested - harmless
-	// (it just recreates a mesh component), but worth knowing about.
+	// Cancel any in-flight generation/meshing job for this coordinate.
+	// RequestCancel prevents Queued jobs from starting Work(). For Running
+	// jobs, Work() finishes but OnChunkMeshReady's guard (checking
+	// RequestedCoordinates) discards the result — see that method's comment.
+	if (const FVoxelJobHandle* JobHandle = InFlightJobHandles.Find(Coordinate))
+	{
+		FVoxelRuntimeModule::Get().GetScheduler().RequestCancel(*JobHandle);
+		InFlightJobHandles.Remove(Coordinate);
+	}
 }
 
 const FVoxelChunk* UVoxelWorldSubsystem::FindChunk(const FVoxelChunkCoordinate& Coordinate) const
@@ -243,4 +262,17 @@ const FVoxelChunk* UVoxelWorldSubsystem::FindChunk(const FVoxelChunkCoordinate& 
 bool UVoxelWorldSubsystem::IsChunkReady(const FVoxelChunkCoordinate& Coordinate) const
 {
 	return ReadyCoordinates.Contains(Coordinate);
+}
+
+void UVoxelWorldSubsystem::SetChunkVisible(const FVoxelChunkCoordinate& Coordinate, bool bVisible)
+{
+	check(IsInGameThread());
+
+	if (const TWeakObjectPtr<UVoxelMeshComponent>* WeakComp = ChunkMeshComponents.Find(Coordinate))
+	{
+		if (WeakComp->IsValid())
+		{
+			WeakComp->Get()->SetVisibility(bVisible, /*bPropagateToChildren=*/ true);
+		}
+	}
 }
