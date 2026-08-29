@@ -32,11 +32,12 @@ bool FVoxelMeshComponentBookkeepingTest::RunTest(const FString& Parameters)
 
 	FVoxelMeshData MeshData;
 	FVoxelMeshVertex V0, V1, V2, V3;
-	V0.Position = FVector(0, 0, 0);
-	V1.Position = FVector(1, 0, 0);
-	V2.Position = FVector(1, 1, 0);
-	V3.Position = FVector(0, 1, 0);
+	V0.Position = FVector3f(0, 0, 0);
+	V1.Position = FVector3f(1, 0, 0);
+	V2.Position = FVector3f(1, 1, 0);
+	V3.Position = FVector3f(0, 1, 0);
 	MeshData.Vertices = { V0, V1, V2, V3 };
+	MeshData.Bounds = FBox(FVector(0, 0, 0), FVector(1, 1, 0));
 
 	FVoxelMeshSection Section;
 	Section.MaterialId = 5;
