@@ -25,6 +25,15 @@
 
 #include "CoreMinimal.h"
 
+/** Priority band for queued voxel work. Nearer-to-player work should use higher priority. */
+enum class EVoxelWorkPriority : uint8
+{
+	Low,
+	Normal,
+	High,
+	Critical
+};
+
 enum class EVoxelJobState : uint8
 {
 	Queued,
