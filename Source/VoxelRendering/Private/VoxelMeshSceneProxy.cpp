@@ -56,16 +56,16 @@ FVoxelMeshSceneProxy::FVoxelMeshSceneProxy(UVoxelMeshComponent* Component)
 				const FVoxelMeshVertex& SourceVertex = MeshData.Vertices[GlobalIndex];
 
 				FDynamicMeshVertex Vertex;
-				Vertex.Position = FVector3f(SourceVertex.Position);
-				Vertex.TextureCoordinate[0] = FVector2f(SourceVertex.UV);
-				Vertex.Color = SourceVertex.Color.ToFColor(/*bSRGB=*/true);
+				Vertex.Position = SourceVertex.Position;
+				Vertex.TextureCoordinate[0] = SourceVertex.UV;
+				Vertex.Color = SourceVertex.Color;
 
-				// Synthesized tangent - see header "Known gaps" note.
-				const FVector Normal = SourceVertex.Normal;
-				const FVector ArbitraryUp = (FMath::Abs(Normal.Z) < 0.99f) ? FVector::UpVector : FVector::ForwardVector;
-				const FVector Tangent = FVector::CrossProduct(Normal, ArbitraryUp).GetSafeNormal();
-				const FVector Bitangent = FVector::CrossProduct(Normal, Tangent);
-				Vertex.SetTangents(FVector3f(Tangent), FVector3f(Bitangent), FVector3f(Normal));
+				// Synthesized tangent
+				const FVector3f Normal = SourceVertex.Normal;
+				const FVector3f ArbitraryUp = (FMath::Abs(Normal.Z) < 0.99f) ? FVector3f::UpVector : FVector3f::ForwardVector;
+				const FVector3f Tangent = FVector3f::CrossProduct(Normal, ArbitraryUp).GetSafeNormal();
+				const FVector3f Bitangent = FVector3f::CrossProduct(Normal, Tangent);
+				Vertex.SetTangents(Tangent, Bitangent, Normal);
 
 				LocalIndex = LocalVertices.Add(Vertex);
 				GlobalToLocalVertexIndex.Add(GlobalIndex, LocalIndex);
