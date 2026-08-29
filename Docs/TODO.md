@@ -36,13 +36,58 @@ See [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md) §9 for the current honest li
 - [ ] **Known gap, deliberately deferred**: no job cancellation for in-flight work — deferred to `VoxelStreaming`
 - [ ] **Known gap, deliberately deferred**: `ChunkMeshComponents` uses `TWeakObjectPtr` in a non-UPROPERTY `TMap` keyed by plain `FVoxelChunkCoordinate` (not USTRUCT) — GC safety via actor Outer, not reflection
 
-## Next up: VoxelStreaming
+## Just completed: VoxelStreaming (Phase 6.1 & 6.2 Performance & Hitch Elimination) ✅
 
-- [ ] Priority queue keyed by distance-to-player (`FVoxelChunkCoordinate::ChebyshevDistanceTo`)
-- [ ] Four independently configurable distance bands (already modeled in `UVoxelRuntimeSettings`: simulation/render/generation/persistence — just not consumed yet)
-- [ ] Job chain per chunk: Generate → Mesh → Collision → GPU Upload → Finalize
-- [ ] **Cancellation**: `EVoxelJobState::Cancelled` and `FVoxelScheduler::RequestCancel` already exist (designed in during Phase 1) — this is where they actually get used. Long-running pass loops need a cancellation check inserted; currently none has one.
-- [ ] Streaming budget enforcement (`StreamingBudgetMs` in settings — currently unread by any code)
+- [x] Distance band classification pure functions (`EVoxelStreamingBand`, `ClassifyChunkDistance`, `ComputeDesiredCoordinates`)
+- [x] `UVoxelStreamingManager` (`UTickableWorldSubsystem`) tracking player viewer position and streaming distance bands
+- [x] **Chunk Lifetime & Storage Safety**: Implemented explicit worker leases (`AcquireWorkerLease` / `ReleaseWorkerLease` in `FVoxelChunkStore`). Chunk memory is NEVER recycled to `FreeSlotIndices` while an active worker holds a lease, eliminating use-after-free/data race during async work.
+- [x] **Authoritative State Machine**: Added `EVoxelChunkState` (`Unloaded`, `Queued`, `Generating`, `Meshing`, `PendingFinalize`, `Ready`, `Unloading`).
+- [x] **Budget-Limited Game Thread Finalization Queue**: Replaced unthrottled `AsyncTask(GameThread)` burst completions with `TQueue<FVoxelCompletedMeshItem, EQueueMode::Mpsc>` in `UVoxelWorldSubsystem`, draining within `RenderSubmissionBudgetMs` (default 1.0ms, max 4 chunks/tick).
+- [x] **Queue Efficiency**: Converted $O(N)$ array shifts (`RemoveAt(0)`) to $O(1)$ cursor indexing (`PendingRequestIndex++`).
+- [x] **Component Pooling (Stage A)**: Added GC-rooted `ComponentPool` on `UVoxelWorldSubsystem` to reuse unrendered `UVoxelMeshComponent` instances across chunk unloads and loads, eliminating `NewObject` / `DestroyComponent` spikes and GC allocation overhead.
+- [x] **Distance-Aware Priority Scheduling (Stage B)**: Chunks are dispatched with priorities matching their distance band (`Critical` for simulation, `High` for render, `Normal` for generation prefetch, `Low` for background).
+- [x] **Change-Driven Visibility (Stage C)**: Eliminated per-tick loops over managed chunk arrays. Visibility is strictly change-driven on chunk boundary transitions or distance setting changes.
+- [x] **Runtime Distance Controls (Stage D)**: Added `SetRenderDistance`, `SetSimulationDistance`, `SetGenerationDistance`, `SetPersistenceDistance`, and `SetStreamingBudgetMs` with budget-safe progressive re-evaluation.
+- [x] **Finalization Queue Latency Telemetry (Stage E)**: Added monotonic queue wait latency tracking (Avg, P50, P95, P99, Max, Oldest age).
+- [x] **Live Performance Diagnostics & Profiling Modes**:
+  - Mode A (Baseline / Framework OFF): Measures pure engine baseline cost.
+  - Mode B (Voxel Rendering ON): Standard voxel generation + rendering + streaming.
+  - Mode C (CPU Generation/Meshing Isolation): Measures generation + greedy meshing on CPU without render component / GPU creation.
+  - Mode D (Static World / Streaming Frozen): Freezes dynamic streaming to isolate steady-state rendering cost.
+  - Mode E (Streaming Stress): Stresses rapid boundary traversal and churn.
+  - Live 12-line HUD displaying FPS, frame pacing percentiles, thread timings, component pool metrics, queue latency percentiles, and VSM shadow caster telemetry.
+  - VSM Dynamic Shadow toggle (`bVoxelCastShadows` / `SetCastShadows`).
+- [x] **Automation Tests**:
+  - `Voxel.Streaming.BandClassification`
+  - `Voxel.Streaming.DesiredCoordinates`
+  - `Voxel.Streaming.CancellationStateTransition`
+  - `Voxel.Streaming.StorageWorkerLeaseLifecycle`
+  - `Voxel.Streaming.StateMachineTransitions`
+  - `Voxel.Streaming.DistancePriorityMapping`
+## Just completed: Phase 6.3 Mobile Scalability Hardening ✅
+
+- [x] **6.3.1 Diagnostic Integrity**:
+  - Unique message key hashing per `AVoxelDebugVisualizer` instance.
+  - Preview geometry cleanup (`ClearVisualization`) on Mode A (Baseline), Mode B (Voxel ON), and Mode C (CPU Only) to prevent manual preview components from skewing real telemetry.
+  - Fully verified `ResetDiagnosticStats` for clean profiling windows.
+- [x] **6.3.2 Low-Risk CPU & Memory Improvements**:
+  - **Compact Vertex Format (`FVoxelMeshVertex` 36 Bytes)**: `FVector3f Position`, `FVector3f Normal`, `FVector2f UV`, `FColor Color` (measured 36 bytes vs former 80 bytes $\rightarrow$ ~55% reduction in vertex bandwidth).
+  - **Worker-Side Vertex Transformation**: Applied world-space chunk origin and scale on worker threads.
+  - **Analytical Bounds**: Calculated `Bounds` on worker thread directly into `FVoxelMeshData`, making Game Thread `UVoxelMeshComponent::UpdateLocalBounds` an instantaneous $O(1)$ operation (zero vertex loops).
+  - **Stateless Pipeline Sharing**: Reused `FVoxelGenerationPipeline` safely across concurrent worker tasks (zero `MakeUnique` allocations per chunk).
+- [x] **6.3.3 Neighbor-Aware Meshing & Lifecycle Remeshing**:
+  - `FVoxelMesher` queries `FVoxelNeighborChunks` (6 cardinal neighbors) to cull redundant internal boundary quads between touching solid chunks.
+  - Missing neighbors fall back cleanly to air (no visual holes or cracks).
+  - `EmptyChunk` fast-path skips greedy meshing sweeps entirely when `Chunk.IsEmpty()`.
+  - **Neighbor Arrival & Unload Remeshing**: When a chunk becomes `Ready` or `Unloads`, adjacent resident chunks are scheduled for lightweight asynchronous remeshing to maintain seamless geometry without interior waste.
+- [x] **6.3.4 Deep Streaming Optimizations (14-Chunk Scale)**:
+  - **Precomputed Relative Offsets**: Precomputed sorted `CachedRelativeOffsets` at initialization and distance settings changes, eliminating $O(\text{volume} \log \text{volume})$ rebuilds and heap allocations on chunk crossings.
+  - **Single-Pass Evaluation**: Merged `PendingUnloads` collection and visibility updates into one pass over `ManagedCoordinates`.
+  - **Zero Duplicate Distances**: Split `GetPriorityForDistance(Dist)` to calculate Chebyshev distance only once in request loops.
+  - **Throttled Clock Polling**: Reduced `FPlatformTime::Seconds()` queries to once every 8 iterations.
+  - **Cached Chunk Coordinate Factors**: Cached `InvChunkWorldEdgeSize` for $O(1)$ multiplication in `WorldToChunkCoordinate`.
+- [x] **Automation Test Suite (23/23 Passing)**:
+  - Added `Voxel.Meshing.NeighborBoundaryCulling` validating exact 36-byte layout and cross-chunk internal boundary face culling.
 
 ## Then: VoxelSerialization
 
