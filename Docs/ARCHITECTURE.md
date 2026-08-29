@@ -137,34 +137,68 @@ This mirrors `AVoxelDebugVisualizer` being an `AActor` (against ADR-001) for the
 
 ---
 
-## 7. Threading model
+## 7. Threading & Finalization Model
 
 ```mermaid
 graph TD
-    GT["Game Thread"] -->|"PrecacheBiomeLayers(biomes)<br/>MUST happen here"| Registry["UVoxelBlockRegistry"]
-    GT -->|"Submit(work, priority)"| Scheduler["FVoxelScheduler"]
+    GT["Game Thread (UVoxelStreamingManager)"] -->|"ComputeDesiredCoordinates & ClassifyChunkDistance"| DistCheck["Distance Evaluation"]
+    GT -->|"RequestChunk(coord)"| Subsystem["UVoxelWorldSubsystem"]
+    Subsystem -->|"AcquireWorkerLease(coord)"| Store["FVoxelChunkStore"]
+    Subsystem -->|"Submit(work, priority)"| Scheduler["FVoxelScheduler"]
     Scheduler -->|"UE::Tasks::Launch"| Worker["Worker Thread"]
     Worker -->|"GenerateChunk(...)<br/>reads Registry read-only"| Pipeline["FVoxelGenerationPipeline"]
-    Pipeline -->|"writes"| Chunk["FVoxelChunk"]
-    Chunk -->|"GenerateMesh(...)<br/>reads Registry read-only"| Mesher["FVoxelMesher"]
+    Pipeline -->|"writes"| Chunk["FVoxelChunk (Leased Slot)"]
+    Worker -->|"GenerateMesh(...)<br/>reads Registry read-only"| Mesher["FVoxelMesher"]
     Mesher -->|"produces"| MeshData["FVoxelMeshData"]
-    Worker -->|"OnComplete callback"| Callback["runs on completing thread -<br/>caller must marshal to<br/>Game Thread itself if needed"]
+    Worker -->|"Enqueue(CompletedMesh)"| MPSC["CompletedMeshQueue<br/>(Thread-Safe MPSC)"]
+    GT -->|"ProcessCompletedMeshQueue<br/>Bounded by RenderSubmissionBudgetMs"| Subsystem
+    Subsystem -->|"SetMeshData / CreateSceneProxy"| Comp["UVoxelMeshComponent"]
+    Subsystem -->|"ReleaseWorkerLease(slot)"| Store
 ```
 
-Two hard rules, both stated in `ADR.md`:
-
-- **Everything expensive is dispatched through `FVoxelScheduler`**, never a hand-rolled thread. `VoxelMeshingService::RequestMeshAsync` follows this exactly — a thin pass-through, not a new abstraction.
-- **`OnComplete` callbacks run on whatever thread the task finishes on** — not automatically marshaled to Game Thread.
-
-### Cancellation (designed in, not yet wired up)
-
-Still true for meshing as it was for generation: nothing currently cancels an in-flight mesh job. The data model (`EVoxelJobState`) supports it whenever `VoxelStreaming` needs it.
+### Key Concurrency & Performance Invariants:
+1. **Asynchronous Worker Lease (`AcquireWorkerLease` / `ReleaseWorkerLease`)**:
+   - `FVoxelChunkStore` tracks active worker references per slot (`InFlightWorkers`).
+   - If `UnloadChunk` is called while generation/meshing is active, the slot is unlinked from coordinates but **never recycled to `FreeSlotIndices`** until `InFlightWorkers == 0`. This completely eliminates use-after-free and data race corruption on pooled chunks.
+2. **Authoritative State Machine (`EVoxelChunkState`)**:
+   - `Unloaded → Queued → Generating → Meshing → PendingFinalize → Ready`.
+   - `UnloadRequested → Unloading → (Worker finishes) → Unloaded`.
+3. **Budget-Limited Game Thread Finalization Queue**:
+   - Instead of burst-firing `AsyncTask(GameThread)` directly into the frame when dozens of worker tasks finish simultaneously, workers push results into `CompletedMeshQueue`.
+   - `UVoxelWorldSubsystem::Tick` processes up to `RenderSubmissionBudgetMs` (e.g. 1.0ms) / max 4 chunks per frame, spreading component registrations and GPU uploads smoothly across frames.
+4. **UVoxelMeshComponent Pooling (Stage A)**:
+   - To eliminate high-frequency `NewObject<UVoxelMeshComponent>`, `RegisterComponent`, and `DestroyComponent` garbage collection churn on the Game Thread during player movement, unrendered mesh components are cleared (`ClearMeshData`), hidden (`SetVisibility(false)`), and stored in `UPROPERTY(Transient) TArray<TObjectPtr<UVoxelMeshComponent>> ComponentPool`.
+   - On chunk finalization, idle components are popped and reused. If the pool exceeds `MaxComponentPoolSize` (default 128), excess components are trimmed.
+5. **Distance-Aware Priority Scheduling (Stage B)**:
+   - Chunks are scheduled with priorities mapped to distance bands:
+     - `Dist <= SimulationDistance`: `EVoxelWorkPriority::Critical` (immediate player interaction)
+     - `Dist <= RenderDistance`: `EVoxelWorkPriority::High` (visible chunks)
+     - `Dist <= GenerationDistance`: `EVoxelWorkPriority::Normal` (nearby prefetch)
+     - `Dist > GenerationDistance`: `EVoxelWorkPriority::Low` (background persistence)
+6. **Change-Driven Visibility Updates (Stage C)**:
+   - Full distance checks across `ManagedCoordinates` are eliminated from the per-tick hot loop. Visibility re-evaluations execute only on chunk boundary crossings or when runtime distance parameters change.
+7. **Early Cancellation Bails**:
+   - Workers query job state and atomic cancellation flags before greedy meshing, skipping CPU meshing entirely for chunks that were unloaded during generation.
+8. **Compact Vertex Format (36 Bytes)**:
+   - `FVoxelMeshVertex` uses `FVector3f Position` (12B), `FVector3f Normal` (12B), `FVector2f UV` (8B), and `FColor Color` (4B baked AO) for a layout of exactly 36 bytes (measured and verified against former 80-byte double-precision layout, yielding a ~55% reduction in CPU cache pressure and memory bandwidth).
+9. **Worker-Side Vertex Transformation & Analytical Bounds ($O(1)$ Game Thread)**:
+   - World origin offset (`ChunkOrigin + Base * VoxelWorldSize`) and bounds calculation are moved to worker threads. Game Thread finalization does zero vertex loops and zero vector arithmetic.
+10. **Neighbor-Aware Meshing & Lifecycle Remeshing**:
+   - `FVoxelMesher` queries 6 cardinal neighbors via `FVoxelNeighborChunks` to cull redundant internal boundary quads between touching solid chunks.
+   - When a neighbor becomes `Ready` or `Unloads`, adjacent resident chunks are queued for asynchronous remeshing (without re-generating voxel data).
+11. **Stateless Pipeline Sharing**:
+   - `FVoxelGenerationPipeline` passes are stateless and shared safely across concurrent worker tasks, eliminating per-chunk heap allocations (`MakeUnique` pass instantiations).
+12. **Precomputed Relative Offsets & Merged Single-Pass Streaming**:
+   - `UVoxelStreamingManager` precalculates and sorts relative coordinate offsets once (`CachedRelativeOffsets`) at initialization and distance changes. Chunk boundary crossings perform an $O(N)$ translation into a persistent buffer with zero sorting and zero heap allocations.
+   - Merged `PendingUnloads` collection and visibility updates into a single pass over `ManagedCoordinates`, eliminating redundant iterations and duplicate distance calculations.
+   - Distance evaluations in the request loop are computed once via `GetPriorityForDistance(Dist)`.
+   - Time budget queries poll `FPlatformTime::Seconds()` every 8 iterations to minimize clock syscall overhead.
 
 ---
 
 ## 8. Design checkpoint — World/Game Design (frozen pending decisions)
 
-**Status: `VoxelRendering` and `VoxelWorld` complete, unaffected by this checkpoint exactly as predicted. Still open for anything touching Regions/Island Foundation.**
+**Status: `VoxelRendering`, `VoxelWorld`, `VoxelStreaming`, and `Phase 6.3 Mobile Scalability Hardening` complete. Still open for anything touching Regions/Island Foundation.**
 
 The project's scope has clarified since Phase 0: this is a **reusable framework whose first production customer is a specific game**, not a generic infinite-world voxel engine.
 
@@ -172,44 +206,18 @@ The project's scope has clarified since Phase 0: this is a **reusable framework 
 - The island contains **Regions** — logical identity/history areas, explicitly **not** synonymous with biomes.
 - **Handcrafted content** must be able to reserve space that procedural generation blends around.
 - Progression is **chapter-based**.
-- The intended generation pipeline shape (future, not yet implemented):
-
-```mermaid
-flowchart TD
-    World["World Definition"] --> Island["Island Foundation"]
-    Island --> Regions["Regions"]
-    Regions --> Modifiers["Regional Modifiers"]
-    Modifiers --> ClimateBiome["Climate / Biome"]
-    ClimateBiome --> Terrain
-    Terrain --> Water
-    Terrain --> Caves
-    Water --> Vegetation
-    Caves --> Vegetation
-    Vegetation --> Structures
-    Structures --> Finalization
-    Finalization --> Meshing
-```
-
-  Everything from `Climate / Biome` through `Meshing` already exists and matches this shape. `World Definition → Island Foundation → Regions → Regional Modifiers` and `Water`/`Structures`/`Vegetation`/`Finalization` are the acknowledged gaps.
 
 ### Architecture impact analysis
 
-- **No conflict** with ADR-001 through ADR-005, or any existing type — confirmed in practice now that `VoxelMeshing` shipped clean, exactly as the analysis predicted.
+- **No conflict** with ADR-001 through ADR-005, or any existing type.
 - **One real open architectural question**, unchanged since the checkpoint opened: region/island data is inherently **global**, not derivable from a single chunk's coordinate. Needs a precomputed, read-only structure, same pattern as `UVoxelBlockRegistry::PrecacheBiomeLayers` at world scale. **Should become its own ADR (ADR-006) before any region code is written.**
-- **One open question for `VoxelSerialization`** (not started, not urgent): reserved/handcrafted content representation.
-- `UVoxelRuntimeSettings` is the wrong place for per-world island parameters — not blocking anything before `VoxelWorldSubsystem` work starts.
 
-### What's still correct to build right now
-
-**`VoxelStreaming` is next**, unaffected by any of the above — same reasoning that correctly predicted `VoxelMeshing`, `VoxelRendering`, and `VoxelWorld` would be unaffected. Its contract ("decide which chunks to load/unload based on player position") has zero knowledge of regions or story content.
+---
 
 ## 9. What's deliberately not built yet
 
-- **No `VoxelStreaming`.** No distance-to-player logic, no automatic chunk loading/unloading. `UVoxelWorldSubsystem::RequestChunk` is called externally.
 - **No River/Structure/Vegetation passes.**
-- **No cross-chunk mesh stitching.** `FVoxelMesher` treats chunk edges as facing air unconditionally — a real gap once multiple chunks render adjacently, explicitly deferred to `VoxelStreaming`.
-- **No vertex deduplication in meshing output.** Correct, not maximally memory-efficient.
-- **No serialization.**
-- **No job cancellation wired up.** `EVoxelJobState::Cancelled` and `FVoxelScheduler::RequestCancel` exist but nothing invokes them yet — deferred to `VoxelStreaming`.
+- **No vertex deduplication across quads in meshing output.** Correct, not maximally memory-efficient.
+- **No serialization.** (Next Phase: VoxelSerialization).
 
 See `TODO.md` for the prioritized version of this list.
