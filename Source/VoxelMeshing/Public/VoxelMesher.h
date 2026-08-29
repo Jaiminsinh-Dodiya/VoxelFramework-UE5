@@ -28,24 +28,39 @@
 
 #include "CoreMinimal.h"
 #include "VoxelMeshData.h"
+#include "VoxelCoreTypes.h"
 
 class FVoxelChunk;
 class UVoxelBlockRegistry;
+
+/** Read-only pointers to 6 cardinal neighboring chunks for cross-chunk boundary querying and culling. */
+struct VOXELMESHING_API FVoxelNeighborChunks
+{
+	const FVoxelChunk* NegX = nullptr;
+	const FVoxelChunk* PosX = nullptr;
+	const FVoxelChunk* NegY = nullptr;
+	const FVoxelChunk* PosY = nullptr;
+	const FVoxelChunk* NegZ = nullptr;
+	const FVoxelChunk* PosZ = nullptr;
+};
 
 class VOXELMESHING_API FVoxelMesher
 {
 public:
 	/**
-	 * Generates mesh data for Chunk. BlockRegistry may be nullptr - in that
-	 * case, MaterialId falls back to the raw FVoxelBlockId and no per-block
-	 * vertex tint is applied (see FVoxelMeshSection::MaterialId comment).
+	 * Generates mesh data for Chunk via greedy meshing + per-vertex AO.
 	 *
-	 * Chunk-edge voxels are treated as facing air beyond the chunk boundary
-	 * (no cross-chunk neighbor lookup) - this means faces at chunk edges are
-	 * always emitted even if an adjacent chunk has a solid voxel there.
-	 * Stitching seams across chunk boundaries is explicitly NOT handled here
-	 * (see Docs/TODO.md) - it is a VoxelStreaming/world-subsystem concern
-	 * once chunks are aware of their neighbors.
+	 * When Neighbors is non-null, out-of-chunk voxel lookups read from the adjacent
+	 * neighbor chunk, eliminating internal boundary quads. Missing neighbors fall
+	 * back safely to air.
+	 *
+	 * When Coordinate is non-null, vertex positions and bounds are transformed
+	 * directly to world space on the worker thread, eliminating Game Thread vertex loops.
 	 */
-	static FVoxelMeshData GenerateMesh(const FVoxelChunk& Chunk, const UVoxelBlockRegistry* BlockRegistry);
+	static FVoxelMeshData GenerateMesh(
+		const FVoxelChunk& Chunk,
+		const UVoxelBlockRegistry* BlockRegistry,
+		const FVoxelNeighborChunks* Neighbors = nullptr,
+		const FVoxelChunkCoordinate* Coordinate = nullptr,
+		float VoxelWorldSize = 100.0f);
 };
