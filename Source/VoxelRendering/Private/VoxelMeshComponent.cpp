@@ -27,19 +27,20 @@ void UVoxelMeshComponent::ClearMeshData()
 
 void UVoxelMeshComponent::UpdateLocalBounds()
 {
-	FBox BoundingBox(ForceInit);
-	for (const FVoxelMeshVertex& Vertex : MeshData->Vertices)
+	if (MeshData.IsValid() && MeshData->Bounds.IsValid)
 	{
-		BoundingBox += Vertex.Position;
+		LocalBounds = FBoxSphereBounds(MeshData->Bounds);
 	}
-
-	LocalBounds = BoundingBox.IsValid
-		? FBoxSphereBounds(BoundingBox)
-		: FBoxSphereBounds(FVector::ZeroVector, FVector::ZeroVector, 0.0f);
+	else
+	{
+		LocalBounds = FBoxSphereBounds(FVector::ZeroVector, FVector::ZeroVector, 0.0f);
+	}
 }
 
 FPrimitiveSceneProxy* UVoxelMeshComponent::CreateSceneProxy()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Voxel_SceneProxyCreate);
+
 	if (!MeshData.IsValid() || MeshData->IsEmpty())
 	{
 		return nullptr; // engine handles a null proxy correctly - component just draws nothing
