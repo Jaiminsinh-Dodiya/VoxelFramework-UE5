@@ -11,14 +11,12 @@
 // Explicit scope boundary (see TODO.md / Docs/ARCHITECTURE.md):
 //   - This class does NOT decide WHEN or WHY to request a chunk (no
 //     distance-to-player logic, no automatic loading) - that is
-//     VoxelStreaming's job, not yet built. RequestChunk is called
-//     externally, by whatever decides chunks are needed.
-//   - This class does NOT stitch mesh seams across chunk boundaries -
-//     FVoxelMesher already documents that gap, and it is unchanged here.
+//     VoxelStreaming's job. RequestChunk is called externally by
+//     UVoxelStreamingManager or diagnostic visualizers.
 //   - UnloadChunk cancels in-flight jobs via FVoxelScheduler::RequestCancel.
 //     Note that RequestCancel only prevents a Queued job from starting;
 //     a Running job's Work() completes normally (state stays Cancelled).
-//     OnChunkMeshReady guards against this by checking RequestedCoordinates
+//     FinalizeChunkMesh guards against this by checking RequestedCoordinates
 //     before acting on the result — this is the actual fix, not optional
 //     defense-in-depth (cancelled-while-running is the common case since
 //     generation+meshing typically finishes near-instantly).
@@ -52,6 +50,8 @@
 #include "VoxelCoreTypes.h"
 #include "VoxelChunkStore.h"
 #include "VoxelJobTypes.h"
+#include "Tickable.h"
+#include "VoxelMeshData.h"
 #include "VoxelWorldSubsystem.generated.h"
 class FVoxelChunk;
 class UVoxelBlockRegistry;
@@ -59,10 +59,28 @@ class UVoxelBiomeDefinition;
 class UVoxelMeshComponent;
 class UMaterialInterface;
 class AVoxelWorldRenderActor;
-struct FVoxelMeshData;
+
+struct FVoxelCompletedMeshItem
+{
+	FVoxelChunkCoordinate Coordinate;
+	int32 SlotIndex = INDEX_NONE;
+	FVoxelMeshData MeshData;
+	double QueueEntryTime = 0.0;
+	bool bIsRemesh = false;
+
+	FVoxelCompletedMeshItem() = default;
+	FVoxelCompletedMeshItem(const FVoxelChunkCoordinate& InCoordinate, int32 InSlotIndex, FVoxelMeshData&& InMeshData, double InQueueEntryTime, bool bInIsRemesh = false)
+		: Coordinate(InCoordinate)
+		, SlotIndex(InSlotIndex)
+		, MeshData(MoveTemp(InMeshData))
+		, QueueEntryTime(InQueueEntryTime)
+		, bIsRemesh(bInIsRemesh)
+	{
+	}
+};
 
 UCLASS()
-class VOXELWORLD_API UVoxelWorldSubsystem : public UWorldSubsystem
+class VOXELWORLD_API UVoxelWorldSubsystem : public UTickableWorldSubsystem
 {
 	GENERATED_BODY()
 
@@ -71,37 +89,82 @@ public:
 	virtual void Deinitialize() override;
 	virtual ~UVoxelWorldSubsystem() override;
 
+	virtual void Tick(float DeltaTime) override;
+	virtual TStatId GetStatId() const override;
+
 	/**
 	 * Reserves storage for Coordinate (synchronous, cheap) and dispatches
 	 * generation+meshing asynchronously. Idempotent - calling again for an
 	 * already-requested-or-loaded coordinate just returns the existing
 	 * handle without dispatching a second job.
 	 */
-	FVoxelChunkHandle RequestChunk(const FVoxelChunkCoordinate& Coordinate);
+	FVoxelChunkHandle RequestChunk(const FVoxelChunkCoordinate& Coordinate, EVoxelWorkPriority WorkPriority = EVoxelWorkPriority::Normal);
 
 	/** Removes the chunk's storage and rendering. Cancels any in-flight generation/meshing job for this coordinate via FVoxelScheduler::RequestCancel. */
-	void UnloadChunk(const FVoxelChunkCoordinate& Coordinate);
+	void UnloadChunk(const FVoxelChunkCoordinate& Coordinate, bool bTriggerNeighborRemesh = true);
 
 	/** Read-only access to already-generated chunk data. Returns nullptr if not requested, still generating, or unloaded. */
 	const FVoxelChunk* FindChunk(const FVoxelChunkCoordinate& Coordinate) const;
 
-	/** True once the chunk has been generated (mesh may still be empty for an all-air chunk - that's a valid ready state, not a pending one). */
+	/** True once the chunk has been generated and meshed into the ready state. */
 	bool IsChunkReady(const FVoxelChunkCoordinate& Coordinate) const;
+
+	/** Authoritative lifecycle state of a chunk coordinate. */
+	EVoxelChunkState GetChunkState(const FVoxelChunkCoordinate& Coordinate) const;
+
+	/** Requests an asynchronous remesh for an already resident ready chunk (e.g. when neighboring chunk arrives or unloads). */
+	void RequestRemeshChunk(const FVoxelChunkCoordinate& Coordinate, EVoxelWorkPriority WorkPriority = EVoxelWorkPriority::Normal);
 
 	/** Toggle rendering visibility for a chunk's mesh component. No-op if chunk has no component (in-flight or all-air). */
 	void SetChunkVisible(const FVoxelChunkCoordinate& Coordinate, bool bVisible);
+
+	/** Sets dynamic shadow casting across all voxel mesh components (useful for isolating VSM impact). */
+	void SetCastShadows(bool bInCastShadows);
+	bool GetCastShadows() const { return bCastShadows; }
+
+	/** If enabled, worker pipeline generates and meshes chunks on CPU but bypasses GameThread render component creation (Mode C isolation). */
+	void SetCpuOnlyMode(bool bInCpuOnly) { bCpuOnlyMode = bInCpuOnly; }
+	bool IsCpuOnlyMode() const { return bCpuOnlyMode; }
+
+	/** Unloads all active chunks and cancels in-flight jobs. */
+	void ClearAllChunks();
 
 	int32 GetChunkSize() const { return ChunkSize; }
 	int32 GetWorldSeed() const { return WorldSeed; }
 	int32 GetReadyChunkCount() const { return ReadyCoordinates.Num(); }
 	int32 GetRequestedChunkCount() const { return RequestedCoordinates.Num(); }
+	int32 GetFinalizationQueueDepth() const { return FinalizationQueueDepth; }
+	float GetLastFinalizeBudgetUsedMs() const { return LastFinalizeBudgetUsedMs; }
+	int32 GetLastFinalizeCount() const { return LastFinalizeCount; }
+
+	// Component Pool Metrics
+	int32 GetActiveComponentCount() const { return ChunkMeshComponents.Num(); }
+	int32 GetPooledComponentCount() const { return ComponentPool.Num(); }
+	int32 GetCreatedComponentCount() const { return CreatedComponentCount; }
+	int32 GetReusedComponentCount() const { return ReusedComponentCount; }
+	int32 GetDestroyedComponentCount() const { return DestroyedComponentCount; }
+	int32 GetPeakPoolSize() const { return PeakPoolSize; }
+
+	// Finalization Queue Latency Metrics
+	float GetAverageQueueLatencyMs() const { return AverageQueueLatencyMs; }
+	float GetMaxQueueLatencyMs() const { return MaxQueueLatencyMs; }
+	float GetOldestQueueItemAgeMs() const { return OldestQueueItemAgeMs; }
+	float CalculateQueueLatencyPercentile(float Percentile) const;
+
+	void SetMaxComponentPoolSize(int32 InMaxSize) { MaxComponentPoolSize = FMath::Max(0, InMaxSize); }
+	int32 GetMaxComponentPoolSize() const { return MaxComponentPoolSize; }
 
 private:
-	void OnChunkMeshReady(FVoxelChunkCoordinate Coordinate, FVoxelMeshData&& MeshData);
+	void ProcessCompletedMeshQueue(float DeltaTime);
+	void FinalizeChunkMesh(FVoxelCompletedMeshItem&& Item);
 	UVoxelMeshComponent* GetOrCreateMeshComponent(const FVoxelChunkCoordinate& Coordinate);
 	UMaterialInterface* ResolveMaterialForId(int32 MaterialId) const;
 
+	bool bCastShadows = true;
+	bool bCpuOnlyMode = false;
+
 	TUniquePtr<FVoxelChunkStore> ChunkStore;
+	TSharedPtr<class FVoxelGenerationPipeline> GenerationPipeline;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UVoxelBlockRegistry> BlockRegistry;
@@ -120,16 +183,46 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInterface> ResolvedDefaultMaterial;
 
+	// Component pool strongly owned and GC-rooted by UPROPERTY.
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UVoxelMeshComponent>> ComponentPool;
+	int32 MaxComponentPoolSize = 128;
+
+	// Component Pool telemetry
+	int32 CreatedComponentCount = 0;
+	int32 ReusedComponentCount = 0;
+	int32 DestroyedComponentCount = 0;
+	int32 PeakPoolSize = 0;
+
+	// Queue Latency telemetry (samples in ms, rolling window)
+	static constexpr int32 MaxQueueLatencySamples = 200;
+	TArray<float> QueueLatencyHistory;
+	float AverageQueueLatencyMs = 0.0f;
+	float MaxQueueLatencyMs = 0.0f;
+	float OldestQueueItemAgeMs = 0.0f;
+	double TotalQueueLatencyAccumMs = 0.0;
+	int64 TotalFinalizedItemsSampled = 0;
+
 	// Not a UPROPERTY: FVoxelChunkCoordinate is a plain struct (not USTRUCT),
 	// so UHT cannot parse it as a TMap key. GC safety is fine because each
 	// component's Outer is RenderHostActor, which keeps it rooted.
 	TMap<FVoxelChunkCoordinate, TWeakObjectPtr<UVoxelMeshComponent>> ChunkMeshComponents;
 
+	TMap<FVoxelChunkCoordinate, EVoxelChunkState> ChunkStates;
 	TSet<FVoxelChunkCoordinate> RequestedCoordinates; // both in-flight and completed - prevents double-dispatch
 	TSet<FVoxelChunkCoordinate> ReadyCoordinates;     // generation completed (mesh may still be empty for all-air chunks)
-	TMap<FVoxelChunkCoordinate, FVoxelJobHandle> InFlightJobHandles; // coord -> scheduler job, removed on completion or cancellation
+	TSet<FVoxelChunkCoordinate> PendingRemeshCoordinates; // deduplicates in-flight remesh requests
+	TMap<FVoxelChunkCoordinate, FVoxelJobHandle> InFlightJobHandles; // coord -> scheduler job
+	TMap<FVoxelChunkCoordinate, TSharedRef<TAtomic<bool>, ESPMode::ThreadSafe>> InFlightCancelFlags;
+
+	TQueue<FVoxelCompletedMeshItem, EQueueMode::Mpsc> CompletedMeshQueue;
+	TAtomic<int32> FinalizationQueueDepth{ 0 };
 
 	int32 ChunkSize = 32;
 	int32 WorldSeed = 1234;
 	float VoxelWorldSize = 100.0f;
+	float RenderSubmissionBudgetMs = 1.0f;
+
+	float LastFinalizeBudgetUsedMs = 0.0f;
+	int32 LastFinalizeCount = 0;
 };
