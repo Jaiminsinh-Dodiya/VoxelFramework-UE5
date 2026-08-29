@@ -17,11 +17,24 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VoxelJobTypes.h"
 
 /** Bit-packed block identifier. 16 bits today, room to grow without breaking save format (see VoxelPersistence). */
 using FVoxelBlockId = uint16;
 
 constexpr FVoxelBlockId VoxelBlockId_Air = 0;
+
+/** Authoritative lifecycle state of a chunk in memory / streaming pipeline. */
+enum class EVoxelChunkState : uint8
+{
+	Unloaded,        // Not in memory, no storage allocated
+	Queued,          // Storage reserved, generation job queued
+	Generating,      // Worker thread running generation passes
+	Meshing,         // Worker thread running greedy mesher
+	PendingFinalize, // Mesh data ready, waiting in Game Thread finalization queue
+	Ready,           // Fully generated, meshed, and resident in chunk store
+	Unloading        // Unload requested; waiting for in-flight worker jobs before slot recycling
+};
 
 /** Integer chunk-space coordinate (not world-space; multiply by chunk size to get world position). */
 struct FVoxelChunkCoordinate
