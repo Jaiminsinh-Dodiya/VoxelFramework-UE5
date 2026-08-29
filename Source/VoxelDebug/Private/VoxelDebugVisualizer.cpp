@@ -19,6 +19,7 @@
 #include "Misc/App.h"
 #include "HAL/PlatformMemory.h"
 #include "HAL/PlatformTime.h"
+#include "RHI.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelDebug, Log, All);
 
@@ -49,9 +50,9 @@ UInstancedStaticMeshComponent* AVoxelDebugVisualizer::GetOrCreateComponentForBlo
 	Component->RegisterComponent();
 
 	UMaterialInterface* Material = nullptr;
-	if (TObjectPtr<UMaterialInterface>* Override = BlockMaterials.Find(BlockId))
+	if (const TSoftObjectPtr<UMaterialInterface>* Override = BlockMaterials.Find(BlockId))
 	{
-		Material = *Override;
+		Material = Override->LoadSynchronous();
 	}
 	else
 	{
@@ -307,10 +308,10 @@ void AVoxelDebugVisualizer::GenerateAndVisualizeMeshed()
 				else
 				{
 					const FVoxelMeshVertex& SourceVertex = MeshData.Vertices[GlobalIndex];
-					LocalIndex = Positions.Add(ChunkWorldOrigin + SourceVertex.Position * VoxelWorldSize);
-					Normals.Add(SourceVertex.Normal);
-					UVs.Add(SourceVertex.UV);
-					VertexColors.Add(SourceVertex.Color.ToFColor(/*bSRGB=*/true));
+					LocalIndex = Positions.Add(ChunkWorldOrigin + FVector(SourceVertex.Position) * VoxelWorldSize);
+					Normals.Add(FVector(SourceVertex.Normal));
+					UVs.Add(FVector2D(SourceVertex.UV));
+					VertexColors.Add(SourceVertex.Color);
 					GlobalToLocalVertexIndex.Add(GlobalIndex, LocalIndex);
 				}
 				Triangles.Add(LocalIndex);
@@ -319,9 +320,9 @@ void AVoxelDebugVisualizer::GenerateAndVisualizeMeshed()
 			PMC->CreateMeshSection(SectionIndex, Positions, Triangles, Normals, UVs, VertexColors, Tangents, bEnableCollisionInMeshPreview);
 
 			UMaterialInterface* Material = nullptr;
-			if (TObjectPtr<UMaterialInterface>* Override = BlockMaterials.Find(Section.MaterialId))
+			if (const TSoftObjectPtr<UMaterialInterface>* Override = BlockMaterials.Find(Section.MaterialId))
 			{
-				Material = *Override;
+				Material = Override->LoadSynchronous();
 			}
 			else
 			{
@@ -354,17 +355,13 @@ void AVoxelDebugVisualizer::GenerateAndVisualizeRendered()
 	int32 TotalTriangles = 0;
 	double TotalMeshingMs = 0.0;
 
-	// Deliberately mirrors GenerateAndVisualizeMeshed's structure exactly
-	// (same per-chunk granularity, same FVoxelMesher call) so the two modes
-	// are a fair, direct comparison - the ONLY difference should be which
-	// component consumes the resulting FVoxelMeshData.
 	for (const TPair<FVoxelChunkCoordinate, TUniquePtr<FVoxelChunk>>& Entry : GeneratedChunks)
 	{
 		const FVoxelChunkCoordinate& Coord = Entry.Key;
 		const FVoxelChunk& Chunk = *Entry.Value;
 
 		const double MeshStart = FPlatformTime::Seconds();
-		FVoxelMeshData MeshData = FVoxelMesher::GenerateMesh(Chunk, LocalRegistry);
+		FVoxelMeshData MeshData = FVoxelMesher::GenerateMesh(Chunk, LocalRegistry, nullptr, &Coord, VoxelWorldSize);
 		TotalMeshingMs += (FPlatformTime::Seconds() - MeshStart) * 1000.0;
 
 		if (MeshData.IsEmpty())
@@ -374,24 +371,6 @@ void AVoxelDebugVisualizer::GenerateAndVisualizeRendered()
 
 		TotalVertices += MeshData.Vertices.Num();
 		TotalTriangles += MeshData.GetTotalTriangleCount();
-
-		// FVoxelMesher outputs 1-unit-per-voxel local positions - scale by
-		// VoxelWorldSize and offset by the chunk's world origin, same
-		// convention as the PMC path, so both modes render at the same
-		// scale/location for a true side-by-side comparison. UVoxelMeshComponent
-		// doesn't know about "chunks" or world scale itself (per ADR-004,
-		// it only knows FVoxelMeshData) - baking this into vertex positions
-		// here, at the debug-tool call site, is the correct place for it,
-		// not inside VoxelRendering.
-		const FVector ChunkWorldOrigin(
-			Coord.X * ChunkSize * VoxelWorldSize,
-			Coord.Y * ChunkSize * VoxelWorldSize,
-			Coord.Z * ChunkSize * VoxelWorldSize);
-
-		for (FVoxelMeshVertex& Vertex : MeshData.Vertices)
-		{
-			Vertex.Position = ChunkWorldOrigin + Vertex.Position * VoxelWorldSize;
-		}
 
 		UVoxelMeshComponent* RenderComponent = NewObject<UVoxelMeshComponent>(this,
 			*FString::Printf(TEXT("RenderedPreview_%d_%d_%d"), Coord.X, Coord.Y, Coord.Z));
@@ -405,9 +384,9 @@ void AVoxelDebugVisualizer::GenerateAndVisualizeRendered()
 		for (int32 SectionIndex = 0; SectionIndex < MeshData.Sections.Num(); ++SectionIndex)
 		{
 			UMaterialInterface* Material = nullptr;
-			if (TObjectPtr<UMaterialInterface>* Override = BlockMaterials.Find(MeshData.Sections[SectionIndex].MaterialId))
+			if (const TSoftObjectPtr<UMaterialInterface>* Override = BlockMaterials.Find(MeshData.Sections[SectionIndex].MaterialId))
 			{
-				Material = *Override;
+				Material = Override->LoadSynchronous();
 			}
 			else
 			{
@@ -638,17 +617,18 @@ void AVoxelDebugVisualizer::StartPerformanceDiagnostics()
 		return;
 	}
 
+	ResetDiagnosticStats();
 	bDiagnosticsRunning = true;
 
 	// Run initial tick immediately
 	DiagnosticsTick(0.0f);
 
-	// Register 10 Hz ticker (0.1s delay)
+	// Register 10 Hz ticker (0.1s interval)
 	DiagnosticsTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
 		FTickerDelegate::CreateUObject(this, &AVoxelDebugVisualizer::DiagnosticsTick),
 		0.1f);
 
-	UE_LOG(LogVoxelDebug, Log, TEXT("[Diagnostics] Started live performance diagnostics (10 Hz). Watch the viewport HUD."));
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Diagnostics] Started live performance diagnostics (10 Hz). Watch viewport HUD."));
 }
 
 void AVoxelDebugVisualizer::StopPerformanceDiagnostics()
@@ -670,11 +650,151 @@ void AVoxelDebugVisualizer::StopPerformanceDiagnostics()
 	{
 		for (int32 i = 0; i < DiagnosticsLineCount; ++i)
 		{
-			GEngine->RemoveOnScreenDebugMessage(DiagnosticsKeyBase + i);
+			GEngine->RemoveOnScreenDebugMessage(GetDiagnosticsKey(i));
 		}
 	}
 
 	UE_LOG(LogVoxelDebug, Log, TEXT("[Diagnostics] Performance diagnostics stopped and overlay removed."));
+}
+
+void AVoxelDebugVisualizer::ApplyModeA_Baseline()
+{
+	ClearVisualization();
+	ActiveDiagnosticMode = EVoxelDiagnosticMode::ModeA_Baseline;
+	UWorld* World = GetWorld();
+	if (World)
+	{
+		if (UVoxelStreamingManager* StreamingManager = World->GetSubsystem<UVoxelStreamingManager>())
+		{
+			StreamingManager->SetStreamingFrozen(true);
+			StreamingManager->ClearAllManaged();
+		}
+		if (UVoxelWorldSubsystem* Subsystem = World->GetSubsystem<UVoxelWorldSubsystem>())
+		{
+			Subsystem->ClearAllChunks();
+		}
+	}
+	ResetDiagnosticStats();
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Diagnostics] Mode A Applied: Baseline (Voxel Framework OFF). Measuring pure engine/scene baseline cost."));
+}
+
+void AVoxelDebugVisualizer::ApplyModeB_VoxelRenderingOn()
+{
+	ClearVisualization();
+	ActiveDiagnosticMode = EVoxelDiagnosticMode::ModeB_VoxelRenderingOn;
+	UWorld* World = GetWorld();
+	if (World)
+	{
+		if (UVoxelWorldSubsystem* Subsystem = World->GetSubsystem<UVoxelWorldSubsystem>())
+		{
+			Subsystem->SetCpuOnlyMode(false);
+			Subsystem->SetCastShadows(bVoxelCastShadows);
+		}
+		if (UVoxelStreamingManager* StreamingManager = World->GetSubsystem<UVoxelStreamingManager>())
+		{
+			StreamingManager->SetStreamingFrozen(false);
+			StreamingManager->ForceReevaluateQueue();
+		}
+	}
+	ResetDiagnosticStats();
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Diagnostics] Mode B Applied: Normal Voxel Rendering ON."));
+}
+
+void AVoxelDebugVisualizer::ApplyModeC_CpuOnly()
+{
+	ClearVisualization();
+	ActiveDiagnosticMode = EVoxelDiagnosticMode::ModeC_CpuOnly;
+	UWorld* World = GetWorld();
+	if (World)
+	{
+		if (UVoxelWorldSubsystem* Subsystem = World->GetSubsystem<UVoxelWorldSubsystem>())
+		{
+			Subsystem->SetCpuOnlyMode(true);
+			Subsystem->ClearAllChunks();
+		}
+		if (UVoxelStreamingManager* StreamingManager = World->GetSubsystem<UVoxelStreamingManager>())
+		{
+			StreamingManager->ClearAllManaged();
+			StreamingManager->SetStreamingFrozen(false);
+			StreamingManager->ForceReevaluateQueue();
+		}
+	}
+	ResetDiagnosticStats();
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Diagnostics] Mode C Applied: CPU Generation & Meshing isolation (Render Components & GPU Work Bypassed)."));
+}
+
+void AVoxelDebugVisualizer::ApplyModeD_StaticWorld()
+{
+	ActiveDiagnosticMode = EVoxelDiagnosticMode::ModeD_StaticWorld;
+	UWorld* World = GetWorld();
+	if (World)
+	{
+		if (UVoxelStreamingManager* StreamingManager = World->GetSubsystem<UVoxelStreamingManager>())
+		{
+			StreamingManager->SetStreamingFrozen(true);
+		}
+	}
+	ResetDiagnosticStats();
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Diagnostics] Mode D Applied: Static World (Streaming Updates Frozen). Measuring steady-state rendering cost."));
+}
+
+void AVoxelDebugVisualizer::ApplyModeE_StreamingStress()
+{
+	ActiveDiagnosticMode = EVoxelDiagnosticMode::ModeE_StreamingStress;
+	UWorld* World = GetWorld();
+	if (World)
+	{
+		if (UVoxelWorldSubsystem* Subsystem = World->GetSubsystem<UVoxelWorldSubsystem>())
+		{
+			Subsystem->SetCpuOnlyMode(false);
+		}
+		if (UVoxelStreamingManager* StreamingManager = World->GetSubsystem<UVoxelStreamingManager>())
+		{
+			StreamingManager->SetStreamingFrozen(false);
+			StreamingManager->ForceReevaluateQueue();
+		}
+	}
+	ResetDiagnosticStats();
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Diagnostics] Mode E Applied: Streaming Stress."));
+}
+
+void AVoxelDebugVisualizer::ToggleVoxelShadows()
+{
+	bVoxelCastShadows = !bVoxelCastShadows;
+	UWorld* World = GetWorld();
+	if (World)
+	{
+		if (UVoxelWorldSubsystem* Subsystem = World->GetSubsystem<UVoxelWorldSubsystem>())
+		{
+			Subsystem->SetCastShadows(bVoxelCastShadows);
+		}
+	}
+	ResetDiagnosticStats();
+	UE_LOG(LogVoxelDebug, Log, TEXT("[Diagnostics] Voxel Dynamic Shadow Casting: %s"), bVoxelCastShadows ? TEXT("ENABLED") : TEXT("DISABLED"));
+}
+
+void AVoxelDebugVisualizer::ResetDiagnosticStats()
+{
+	FrameTimeHistory.Reset();
+	FramesOver16Ms = 0;
+	FramesOver33Ms = 0;
+	FramesOver50Ms = 0;
+	MinFrameTimeMs = FLT_MAX;
+	MaxFrameTimeMs = 0.0f;
+	TotalFrameTimeAccumMs = 0.0f;
+	TotalFramesSampled = 0;
+}
+
+float AVoxelDebugVisualizer::CalculatePercentile(float Percentile) const
+{
+	if (FrameTimeHistory.Num() == 0)
+	{
+		return 0.0f;
+	}
+	TArray<float> Sorted = FrameTimeHistory;
+	Sorted.Sort();
+	const int32 Index = FMath::Clamp(FMath::RoundToInt(Percentile * (Sorted.Num() - 1)), 0, Sorted.Num() - 1);
+	return Sorted[Index];
 }
 
 void AVoxelDebugVisualizer::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -699,7 +819,7 @@ bool AVoxelDebugVisualizer::DiagnosticsTick(float DeltaTime)
 	UWorld* World = GetWorld();
 	if (!World || !World->IsGameWorld() || !GEngine)
 	{
-		return true; // Keep ticker alive in case world recovers
+		return true; // Keep ticker alive
 	}
 
 	// 1. Engine & Frame Timings
@@ -708,6 +828,32 @@ bool AVoxelDebugVisualizer::DiagnosticsTick(float DeltaTime)
 	const float FrameMs = DeltaSeconds * 1000.0f;
 	const float IdleMs = FApp::GetIdleTime() * 1000.0f;
 	const float WorkMs = FMath::Max(0.0f, FrameMs - IdleMs);
+
+	// Accumulate stats for frame pacing
+	TotalFramesSampled++;
+	TotalFrameTimeAccumMs += FrameMs;
+	MinFrameTimeMs = FMath::Min(MinFrameTimeMs, FrameMs);
+	MaxFrameTimeMs = FMath::Max(MaxFrameTimeMs, FrameMs);
+	if (FrameMs > 16.67f) FramesOver16Ms++;
+	if (FrameMs > 33.33f) FramesOver33Ms++;
+	if (FrameMs > 50.00f) FramesOver50Ms++;
+
+	FrameTimeHistory.Add(FrameMs);
+	if (FrameTimeHistory.Num() > MaxFrameHistorySamples)
+	{
+		FrameTimeHistory.RemoveAt(0, EAllowShrinking::No);
+	}
+
+	const float AvgFrameMs = (TotalFramesSampled > 0) ? (TotalFrameTimeAccumMs / TotalFramesSampled) : FrameMs;
+	const float P95Ms = CalculatePercentile(0.95f);
+	const float P99Ms = CalculatePercentile(0.99f);
+	const float PctOver16 = (TotalFramesSampled > 0) ? (100.0f * FramesOver16Ms / TotalFramesSampled) : 0.0f;
+	const float PctOver33 = (TotalFramesSampled > 0) ? (100.0f * FramesOver33Ms / TotalFramesSampled) : 0.0f;
+
+	const float GameThreadMs = FPlatformTime::ToMilliseconds(GGameThreadTime);
+	const float RenderThreadMs = FPlatformTime::ToMilliseconds(GRenderThreadTime);
+	const uint32 GpuCycles = RHIGetGPUFrameCycles(0);
+	const float GpuMs = (GpuCycles > 0) ? FPlatformTime::ToMilliseconds(GpuCycles) : 0.0f;
 
 	// 2. Memory Stats
 	const FPlatformMemoryStats MemStats = FPlatformMemory::GetStats();
@@ -720,15 +866,20 @@ bool AVoxelDebugVisualizer::DiagnosticsTick(float DeltaTime)
 
 	const int32 ChunkSizeLocal = Subsystem ? Subsystem->GetChunkSize() : ChunkSize;
 	const int32 ManagedCount = StreamingManager ? StreamingManager->GetManagedChunkCount() : 0;
+	const int32 VisibleCount = StreamingManager ? StreamingManager->GetVisibleChunkCount() : 0;
 	const int32 ReadyCount = Subsystem ? Subsystem->GetReadyChunkCount() : 0;
 	const int32 PendingRequests = StreamingManager ? StreamingManager->GetPendingRequestCount() : 0;
 	const int32 PendingUnloads = StreamingManager ? StreamingManager->GetPendingUnloadCount() : 0;
 	const float LastStreamingTickMs = StreamingManager ? StreamingManager->GetLastTickBudgetUsedMs() : 0.0f;
 
+	const int32 FinalizeQueueDepth = Subsystem ? Subsystem->GetFinalizationQueueDepth() : 0;
+	const float LastFinalizeMs = Subsystem ? Subsystem->GetLastFinalizeBudgetUsedMs() : 0.0f;
+	const int32 LastFinalizeCount = Subsystem ? Subsystem->GetLastFinalizeCount() : 0;
+
 	const UVoxelRuntimeSettings* RuntimeSettings = GetDefault<UVoxelRuntimeSettings>();
 	const float StreamingBudgetLimitMs = RuntimeSettings ? RuntimeSettings->StreamingBudgetMs : 1.5f;
+	const float RenderSubmissionBudgetLimitMs = RuntimeSettings ? RuntimeSettings->RenderSubmissionBudgetMs : 1.0f;
 
-	// Raw Voxel Memory: ManagedChunks * ChunkSize^3 * 2 bytes (FVoxelBlockId = uint16)
 	const double RawVoxelMemoryMb = static_cast<double>(ManagedCount) * (ChunkSizeLocal * ChunkSizeLocal * ChunkSizeLocal * 2) / (1024.0 * 1024.0);
 
 	// 4. Color Evaluation
@@ -737,66 +888,128 @@ bool AVoxelDebugVisualizer::DiagnosticsTick(float DeltaTime)
 	const FColor ColorRed(240, 50, 50);
 	const FColor ColorCyan(60, 200, 255);
 	const FColor ColorWhite(230, 230, 230);
+	const FColor ColorOrange(255, 140, 30);
 
 	auto GetFpsColor = [&](float InFps) -> FColor
 	{
-		if (InFps >= 30.0f) return ColorGreen;
-		if (InFps >= 25.0f) return ColorYellow;
+		if (InFps >= 55.0f) return ColorGreen;
+		if (InFps >= 30.0f) return ColorYellow;
 		return ColorRed;
 	};
 
 	auto GetFrameTimeColor = [&](float InMs) -> FColor
 	{
-		if (InMs <= 33.33f) return ColorGreen;  // 30+ FPS
-		if (InMs <= 40.0f)  return ColorYellow; // 25-30 FPS
-		return ColorRed;
+		if (InMs <= 16.67f) return ColorGreen;  // 60+ FPS target
+		if (InMs <= 33.33f) return ColorYellow; // 30-60 FPS target
+		return ColorRed;                        // <30 FPS
 	};
 
-	auto GetStreamingColor = [&](float InMs, float BudgetMs) -> FColor
+	auto GetBudgetColor = [&](float InMs, float BudgetMs) -> FColor
 	{
 		if (InMs <= BudgetMs) return ColorGreen;
 		if (InMs <= BudgetMs * 1.33f) return ColorYellow;
 		return ColorRed;
 	};
 
+	const int32 ActiveCompCount = Subsystem ? Subsystem->GetActiveComponentCount() : 0;
+	const int32 PooledCompCount = Subsystem ? Subsystem->GetPooledComponentCount() : 0;
+	const int32 CreatedCompCount = Subsystem ? Subsystem->GetCreatedComponentCount() : 0;
+	const int32 ReusedCompCount = Subsystem ? Subsystem->GetReusedComponentCount() : 0;
+	const int32 DestroyedCompCount = Subsystem ? Subsystem->GetDestroyedComponentCount() : 0;
+	const int32 PeakPoolCount = Subsystem ? Subsystem->GetPeakPoolSize() : 0;
+
+	const float AvgQueueLatencyMs = Subsystem ? Subsystem->GetAverageQueueLatencyMs() : 0.0f;
+	const float P50QueueLatencyMs = Subsystem ? Subsystem->CalculateQueueLatencyPercentile(0.50f) : 0.0f;
+	const float P95QueueLatencyMs = Subsystem ? Subsystem->CalculateQueueLatencyPercentile(0.95f) : 0.0f;
+	const float P99QueueLatencyMs = Subsystem ? Subsystem->CalculateQueueLatencyPercentile(0.99f) : 0.0f;
+	const float MaxQueueLatencyMs = Subsystem ? Subsystem->GetMaxQueueLatencyMs() : 0.0f;
+	const float OldestItemAgeMs = Subsystem ? Subsystem->GetOldestQueueItemAgeMs() : 0.0f;
+
 	// 5. Draw On-Screen Debug Lines (0.3s display duration for smooth 10 Hz updates)
 	const float DisplayDuration = 0.3f;
 
-	// Line 0: Header
-	GEngine->AddOnScreenDebugMessage(
-		DiagnosticsKeyBase + 0, DisplayDuration, ColorCyan,
-		TEXT("[VOXEL FRAMEWORK: LIVE PERFORMANCE DIAGNOSTICS - 10 Hz]"));
+	FString ModeStr = TEXT("Mode B (Voxel ON)");
+	if (ActiveDiagnosticMode == EVoxelDiagnosticMode::ModeA_Baseline) ModeStr = TEXT("Mode A (Baseline / Voxel OFF)");
+	else if (ActiveDiagnosticMode == EVoxelDiagnosticMode::ModeC_CpuOnly) ModeStr = TEXT("Mode C (CPU Generation/Meshing Isolation)");
+	else if (ActiveDiagnosticMode == EVoxelDiagnosticMode::ModeD_StaticWorld) ModeStr = TEXT("Mode D (Static World / Streaming Frozen)");
+	else if (ActiveDiagnosticMode == EVoxelDiagnosticMode::ModeE_StreamingStress) ModeStr = TEXT("Mode E (Streaming Stress)");
 
-	// Line 1: FPS / Frame Interval
+	// Line 0: Header with Mode & Shadow Status
 	GEngine->AddOnScreenDebugMessage(
-		DiagnosticsKeyBase + 1, DisplayDuration, GetFpsColor(InstantFps),
-		FString::Printf(TEXT("  FPS (Frame Interval): %.1f fps (%.2f ms)  [Target >= 30 fps]"), InstantFps, FrameMs));
+		GetDiagnosticsKey(0), DisplayDuration, ColorCyan,
+		FString::Printf(TEXT("[VOXEL DIAGNOSTICS - 10 Hz] %s | Shadows: %s | Samples: %d"),
+			*ModeStr, bVoxelCastShadows ? TEXT("ON") : TEXT("OFF"), TotalFramesSampled));
 
-	// Line 2: Frame Work vs Idle
+	// Line 1: FPS / Frame Interval + Min / Max / Avg
 	GEngine->AddOnScreenDebugMessage(
-		DiagnosticsKeyBase + 2, DisplayDuration, GetFrameTimeColor(WorkMs),
-		FString::Printf(TEXT("  Frame Work: %.2f ms | Idle/Wait: %.2f ms | Total Delta: %.2f ms  [Mobile Target <= 33.3 ms]"), WorkMs, IdleMs, FrameMs));
+		GetDiagnosticsKey(1), DisplayDuration, GetFpsColor(InstantFps),
+		FString::Printf(TEXT("  FPS: %.1f fps (%.2f ms) | Avg: %.2f ms | Min: %.2f ms | Max Spike: %.2f ms"),
+			InstantFps, FrameMs, AvgFrameMs, (MinFrameTimeMs == FLT_MAX ? 0.0f : MinFrameTimeMs), MaxFrameTimeMs));
 
-	// Line 3: Streaming Work vs Budget
+	// Line 2: Frame Pacing Percentiles
 	GEngine->AddOnScreenDebugMessage(
-		DiagnosticsKeyBase + 3, DisplayDuration, GetStreamingColor(LastStreamingTickMs, StreamingBudgetLimitMs),
-		FString::Printf(TEXT("  Streaming Tick: %.2f ms / Budget: %.2f ms | Queue: %d Req, %d Unload"), LastStreamingTickMs, StreamingBudgetLimitMs, PendingRequests, PendingUnloads));
+		GetDiagnosticsKey(2), DisplayDuration, GetFrameTimeColor(P95Ms),
+		FString::Printf(TEXT("  P95: %.2f ms | P99: %.2f ms | >16.7ms (60fps): %.1f%% | >33.3ms (30fps): %.1f%% | Spikes >50ms: %d"),
+			P95Ms, P99Ms, PctOver16, PctOver33, FramesOver50Ms));
 
-	// Line 4: Chunk Resident Status
+	// Line 3: Thread Timing Breakdown (Game Thread, Render Thread, GPU)
 	GEngine->AddOnScreenDebugMessage(
-		DiagnosticsKeyBase + 4, DisplayDuration, ColorWhite,
-		FString::Printf(TEXT("  Chunks: %d Managed | %d Ready (Meshed & Resident)"), ManagedCount, ReadyCount));
+		GetDiagnosticsKey(3), DisplayDuration, ColorWhite,
+		FString::Printf(TEXT("  Thread Breakdown: GameThread: %.2f ms | RenderThread: %.2f ms | GPU: %.2f ms | Frame Work: %.2f ms"),
+			GameThreadMs, RenderThreadMs, GpuMs, WorkMs));
 
-	// Line 5: Memory Usage
+	// Line 4: Streaming Work vs Budget
 	GEngine->AddOnScreenDebugMessage(
-		DiagnosticsKeyBase + 5, DisplayDuration, ColorWhite,
-		FString::Printf(TEXT("  Raw Voxel Memory (Array Only): %.2f MB | Physical RAM: %.1f MB (Peak: %.1f MB)"), RawVoxelMemoryMb, PhysicalRamMb, PeakRamMb));
+		GetDiagnosticsKey(4), DisplayDuration, GetBudgetColor(LastStreamingTickMs, StreamingBudgetLimitMs),
+		FString::Printf(TEXT("  Streaming Tick: %.2f ms / Budget: %.2f ms | Queue: %d Req, %d Unload"),
+			LastStreamingTickMs, StreamingBudgetLimitMs, PendingRequests, PendingUnloads));
 
-	// Line 6: Overall Mobile Status
-	const bool bPassingMobile = (InstantFps >= 30.0f) && (WorkMs <= 33.33f) && (LastStreamingTickMs <= StreamingBudgetLimitMs);
+	// Line 5: GT Mesh Finalize vs Budget
 	GEngine->AddOnScreenDebugMessage(
-		DiagnosticsKeyBase + 6, DisplayDuration, bPassingMobile ? ColorGreen : ColorYellow,
-		FString::Printf(TEXT("  Overall Mobile Budget Status: %s"), bPassingMobile ? TEXT("PASS (Within Mobile Targets)") : TEXT("WARN / REVIEW (Check Timings Above)")));
+		GetDiagnosticsKey(5), DisplayDuration, GetBudgetColor(LastFinalizeMs, RenderSubmissionBudgetLimitMs),
+		FString::Printf(TEXT("  GT Mesh Finalize: %.2f ms / Budget: %.2f ms | Finalized: %d chunks | Pending Finalize Queue: %d"),
+			LastFinalizeMs, RenderSubmissionBudgetLimitMs, LastFinalizeCount, FinalizeQueueDepth));
+
+	// Line 6: Finalization Queue Latency
+	GEngine->AddOnScreenDebugMessage(
+		GetDiagnosticsKey(6), DisplayDuration, (AvgQueueLatencyMs <= 33.3f) ? ColorGreen : ColorYellow,
+		FString::Printf(TEXT("  Finalize Queue Latency: Avg: %.1f ms | P50: %.1f ms | P95: %.1f ms | P99: %.1f ms | Max: %.1f ms | Oldest: %.1f ms"),
+			AvgQueueLatencyMs, P50QueueLatencyMs, P95QueueLatencyMs, P99QueueLatencyMs, MaxQueueLatencyMs, OldestItemAgeMs));
+
+	// Line 7: Component Pool Telemetry
+	GEngine->AddOnScreenDebugMessage(
+		GetDiagnosticsKey(7), DisplayDuration, ColorWhite,
+		FString::Printf(TEXT("  Component Pool: Active: %d | Pooled: %d (Peak: %d) | Created: %d | Reused: %d | Destroyed: %d"),
+			ActiveCompCount, PooledCompCount, PeakPoolCount, CreatedCompCount, ReusedCompCount, DestroyedCompCount));
+
+	// Line 8: Chunk Residency
+	GEngine->AddOnScreenDebugMessage(
+		GetDiagnosticsKey(8), DisplayDuration, ColorWhite,
+		FString::Printf(TEXT("  Chunks: %d Managed | %d Ready | %d Visible (Non-Nanite Casters)"),
+			ManagedCount, ReadyCount, VisibleCount));
+
+	// Line 9: Memory Footprint
+	GEngine->AddOnScreenDebugMessage(
+		GetDiagnosticsKey(9), DisplayDuration, ColorWhite,
+		FString::Printf(TEXT("  Raw Voxel Memory: %.2f MB | Physical RAM: %.1f MB (Peak: %.1f MB)"),
+			RawVoxelMemoryMb, PhysicalRamMb, PeakRamMb));
+
+	// Line 10: VSM Warning / Shadow Context Note
+	const bool bVsmRisk = bVoxelCastShadows && (VisibleCount > 60);
+	GEngine->AddOnScreenDebugMessage(
+		GetDiagnosticsKey(10), DisplayDuration, bVsmRisk ? ColorOrange : ColorWhite,
+		FString::Printf(TEXT("  VSM Non-Nanite Casters: %d | Shadow Setting: %s %s"),
+			VisibleCount, bVoxelCastShadows ? TEXT("Enabled") : TEXT("Disabled"),
+			bVsmRisk ? TEXT("[WARN: High Non-Nanite shadow count can trigger VSM marking overflow]") : TEXT("")));
+
+	// Line 11: Target Compliance Summary
+	const bool bPassing60 = (AvgFrameMs <= 16.67f) && (P95Ms <= 18.0f) && (FramesOver50Ms == 0);
+	const bool bPassing30 = (AvgFrameMs <= 33.33f) && (P95Ms <= 35.0f);
+	GEngine->AddOnScreenDebugMessage(
+		GetDiagnosticsKey(11), DisplayDuration, bPassing60 ? ColorGreen : (bPassing30 ? ColorYellow : ColorRed),
+		FString::Printf(TEXT("  Target Compliance: 60 FPS Target: %s | 30 FPS Target: %s"),
+			bPassing60 ? TEXT("PASS") : TEXT("FAIL/WARN"),
+			bPassing30 ? TEXT("PASS") : TEXT("FAIL")));
 
 	return true; // Keep ticking
 }
