@@ -32,15 +32,6 @@
 #include "VoxelJobTypes.h"
 #include "Tasks/Task.h"
 
-/** Priority band for queued voxel work. Nearer-to-player work should use higher priority. */
-enum class EVoxelWorkPriority : uint8
-{
-	Low,
-	Normal,
-	High,
-	Critical
-};
-
 class VOXELRUNTIME_API FVoxelScheduler
 {
 public:
