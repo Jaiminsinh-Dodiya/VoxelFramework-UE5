@@ -227,7 +227,7 @@ This is the production rendering path per ADR-004 — `FVoxelMeshData` (plain CP
 Header: `VoxelWorldSubsystem.h`
 
 ### UVoxelWorldSubsystem (UCLASS)
-Parent: `UWorldSubsystem`
+Parent: `UTickableWorldSubsystem`
 The integration point: given a chunk coordinate, produces a rendered chunk asynchronously.
 
 #### Public methods:
@@ -236,37 +236,63 @@ virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 virtual void Deinitialize() override;
 virtual ~UVoxelWorldSubsystem() override;
 
-FVoxelChunkHandle RequestChunk(const FVoxelChunkCoordinate& Coordinate);
+virtual void Tick(float DeltaTime) override;
+virtual TStatId GetStatId() const override;
+
+FVoxelChunkHandle RequestChunk(const FVoxelChunkCoordinate& Coordinate, EVoxelWorkPriority WorkPriority = EVoxelWorkPriority::Normal);
 // Reserves storage (sync, cheap), dispatches generation+meshing async.
 // Idempotent — re-requesting returns existing handle, no second job.
 
-void UnloadChunk(const FVoxelChunkCoordinate& Coordinate);
-// Removes chunk storage and rendering. Does NOT cancel in-flight jobs.
+void UnloadChunk(const FVoxelChunkCoordinate& Coordinate, bool bTriggerNeighborRemesh = true);
+// Removes chunk storage and rendering. Cancels in-flight scheduler job and triggers neighbor boundary remesh.
 
 const FVoxelChunk* FindChunk(const FVoxelChunkCoordinate& Coordinate) const;
 // Read-only access. Returns nullptr if not requested/still generating/unloaded.
 
 bool IsChunkReady(const FVoxelChunkCoordinate& Coordinate) const;
-// True once generation completed (mesh may be empty for all-air chunks).
+// True once generation and meshing have completed.
+
+EVoxelChunkState GetChunkState(const FVoxelChunkCoordinate& Coordinate) const;
+// Authoritative lifecycle state of a chunk coordinate.
+
+void RequestRemeshChunk(const FVoxelChunkCoordinate& Coordinate, EVoxelWorkPriority WorkPriority = EVoxelWorkPriority::Normal);
+// Asynchronously remeshes an existing ready chunk to update boundary seams without re-generating voxels.
+
+void SetChunkVisible(const FVoxelChunkCoordinate& Coordinate, bool bVisible);
+// Toggles mesh component visibility.
+
+void SetCastShadows(bool bInCastShadows);
+// Sets dynamic shadow casting across all voxel mesh components.
+
+void SetCpuOnlyMode(bool bInCpuOnly);
+// Bypasses render component creation and GPU uploads to isolate CPU throughput (Mode C).
+
+void ClearAllChunks();
+// Unloads all active chunks and cancels in-flight jobs.
 
 int32 GetChunkSize() const;
 int32 GetWorldSeed() const;
+int32 GetReadyChunkCount() const;
+int32 GetRequestedChunkCount() const;
+int32 GetFinalizationQueueDepth() const;
+float GetLastFinalizeBudgetUsedMs() const;
+int32 GetLastFinalizeCount() const;
 ```
 
-#### Private members (for architecture understanding):
-- `TUniquePtr<FVoxelChunkStore> ChunkStore`
-- `TObjectPtr<UVoxelBlockRegistry> BlockRegistry`
-- `TArray<TObjectPtr<UVoxelBiomeDefinition>> ResolvedBiomes`
-- `TObjectPtr<AVoxelWorldRenderActor> RenderHostActor`
-- `TMap<FVoxelChunkCoordinate, TWeakObjectPtr<UVoxelMeshComponent>> ChunkMeshComponents` (NOT UPROPERTY — FVoxelChunkCoordinate is plain struct)
-- `TSet<FVoxelChunkCoordinate> RequestedCoordinates, ReadyCoordinates`
+#### Component Pool & Latency Telemetry Accessors:
+```cpp
+int32 GetActiveComponentCount() const;
+int32 GetPooledComponentCount() const;
+int32 GetCreatedComponentCount() const;
+int32 GetReusedComponentCount() const;
+int32 GetDestroyedComponentCount() const;
+int32 GetPeakPoolSize() const;
 
-Thread ownership: all PUBLIC methods are Game-Thread-only. Worker thread runs generation+meshing, result marshaled back via `AsyncTask(ENamedThreads::GameThread)`.
-
-Explicit scope boundaries (what this class does NOT do):
-- Does NOT decide WHEN or WHY to request a chunk (no distance-to-player logic) — VoxelStreaming's job
-- Does NOT stitch mesh seams across chunk boundaries
-- Does NOT implement job cancellation for in-flight work
+float GetAverageQueueLatencyMs() const;
+float GetMaxQueueLatencyMs() const;
+float GetOldestQueueItemAgeMs() const;
+float CalculateQueueLatencyPercentile(float Percentile) const;
+```
 
 Header: `VoxelWorldSettings.h`
 
@@ -287,12 +313,65 @@ Header: `AVoxelWorldRenderActor.h`
 Parent: `AActor`, NotBlueprintable, NotPlaceable
 Transient host actor spawned by `UVoxelWorldSubsystem` to hold `UVoxelMeshComponents`. Not placed by users — created/destroyed automatically with the subsystem.
 
+## VoxelStreaming
+
+Header: `VoxelStreamingTypes.h`
+
+### EVoxelStreamingBand (enum class)
+- `Simulation` — distance <= SimulationDistance (immediate player interaction)
+- `Render` — distance <= RenderDistance (visible, rendered)
+- `Generation` — distance <= GenerationDistance (data generated + meshed)
+- `Persistence` — distance <= PersistenceDistance (kept resident if modified)
+- `OutOfRange` — distance > PersistenceDistance (eligible for unload)
+
+### VoxelStreaming namespace (Free Functions)
+- `ClassifyChunkDistance(ChebyshevDist, SimDist, RenderDist, GenDist, PersistDist) -> EVoxelStreamingBand`
+- `ComputeDesiredCoordinates(ViewerChunk, GenDist, WorldHeightInChunks) -> TArray<FVoxelChunkCoordinate>`
+
+Header: `VoxelStreamingManager.h`
+
+### UVoxelStreamingManager (UCLASS)
+Parent: `UTickableWorldSubsystem`
+Tick-driven streaming manager that decides which chunks to load, unload, and render based on viewer position and runtime distance bands.
+
+#### Public methods:
+```cpp
+void SetViewerPosition(const FVector& WorldPosition); // Pass FLT_MAX to restore auto-tracking
+int32 GetManagedChunkCount() const;
+int32 GetVisibleChunkCount() const;
+int32 GetPendingRequestCount() const;
+int32 GetPendingUnloadCount() const;
+float GetLastTickBudgetUsedMs() const;
+
+void SetStreamingFrozen(bool bFrozen); // Freezes streaming updates (Mode D)
+bool IsStreamingFrozen() const;
+void ForceReevaluateQueue();
+void ClearAllManaged();
+
+void SetRenderDistance(int32 InRenderDistance);
+int32 GetRenderDistance() const;
+void SetSimulationDistance(int32 InSimulationDistance);
+int32 GetSimulationDistance() const;
+void SetGenerationDistance(int32 InGenerationDistance);
+int32 GetGenerationDistance() const;
+void SetPersistenceDistance(int32 InPersistenceDistance);
+int32 GetPersistenceDistance() const;
+
+void SetStreamingBudgetMs(float InBudgetMs);
+float GetStreamingBudgetMs() const;
+
+EVoxelWorkPriority GetPriorityForCoordinate(const FVoxelChunkCoordinate& Coordinate, const FVoxelChunkCoordinate& ViewerChunk) const;
+FORCEINLINE EVoxelWorkPriority GetPriorityForDistance(int32 Dist) const;
+```
+
 ## VoxelDebug
+
+Header: `VoxelDebugVisualizer.h`
 
 ### AVoxelDebugVisualizer (UCLASS)
 Parent: `AActor`
 
-Properties: `WorldSeed`, `ChunkSize`, `ChunkRadiusXY`, `ChunkCountZ`, `VoxelWorldSize`, `BlockMaterials`, `DefaultMaterial`, `Biomes`, `bEnableCollisionInMeshPreview`
+Properties: `WorldSeed`, `ChunkSize`, `ChunkRadiusXY`, `ChunkCountZ`, `VoxelWorldSize`, `BlockMaterials`, `DefaultMaterial`, `Biomes`, `bEnableCollisionInMeshPreview`, `ActiveDiagnosticMode`, `bVoxelCastShadows`.
 
 #### CallInEditor functions:
 ```cpp
@@ -313,6 +392,33 @@ void ValidateSubsystemResults();       // per-chunk validation: readiness, retri
 
 UFUNCTION(CallInEditor, Category="Voxel Debug")
 void ClearVisualization();
+
+UFUNCTION(CallInEditor, Category="Voxel Debug|Performance")
+void StartPerformanceDiagnostics();
+
+UFUNCTION(CallInEditor, Category="Voxel Debug|Performance")
+void StopPerformanceDiagnostics();
+
+UFUNCTION(CallInEditor, Category="Voxel Debug|Performance|Modes")
+void ApplyModeA_Baseline();
+
+UFUNCTION(CallInEditor, Category="Voxel Debug|Performance|Modes")
+void ApplyModeB_VoxelRenderingOn();
+
+UFUNCTION(CallInEditor, Category="Voxel Debug|Performance|Modes")
+void ApplyModeC_CpuOnly();
+
+UFUNCTION(CallInEditor, Category="Voxel Debug|Performance|Modes")
+void ApplyModeD_StaticWorld();
+
+UFUNCTION(CallInEditor, Category="Voxel Debug|Performance|Modes")
+void ApplyModeE_StreamingStress();
+
+UFUNCTION(CallInEditor, Category="Voxel Debug|Performance")
+void ToggleVoxelShadows();
+
+UFUNCTION(CallInEditor, Category="Voxel Debug|Performance")
+void ResetDiagnosticStats();
 ```
 
 ## Cross-module data flow
