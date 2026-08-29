@@ -20,6 +20,8 @@ public class VoxelDebug : ModuleRules
 			"VoxelWorld",                // subsystem integration test (RequestChunksViaSubsystem)
 			"VoxelStreaming",            // live diagnostics stats (UVoxelStreamingManager)
 			"VoxelRuntime",              // transitive dependency of VoxelWorld
+			"RHI",
+			"RenderCore",
 			"ProceduralMeshComponent",   // debug-tool-only exception to ADR-004 - see VoxelDebugVisualizer.h
 		});
 	}
