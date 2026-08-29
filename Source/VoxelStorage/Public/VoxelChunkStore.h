@@ -51,7 +51,7 @@ public:
 	/** Creates (or returns the existing) chunk at Coordinate. Returns a valid handle either way. */
 	FVoxelChunkHandle CreateOrGetChunk(const FVoxelChunkCoordinate& Coordinate);
 
-	/** Releases the chunk back to the pool. Any handles referencing it become stale (IsValid()/lookup will fail). */
+	/** Releases the chunk back to the pool. If worker jobs are still active on this slot, recycling to FreeSlotIndices is safely deferred until all workers release their lease. */
 	void RemoveChunk(const FVoxelChunkCoordinate& Coordinate);
 
 	/** Returns nullptr if the coordinate has no loaded chunk. */
@@ -60,7 +60,17 @@ public:
 	/** Returns nullptr if the handle is stale or unknown - always check before dereferencing. */
 	FVoxelChunk* FindChunkByHandle(const FVoxelChunkHandle& Handle) const;
 
+	/** Acquires an asynchronous worker lease on the chunk's storage slot, preventing premature reuse. Returns slot index. */
+	int32 AcquireWorkerLease(const FVoxelChunkCoordinate& Coordinate);
+
+	/** Releases an asynchronous worker lease by slot index. If the slot was unloaded, recycles it to FreeSlotIndices once lease count hits 0. */
+	void ReleaseWorkerLease(int32 SlotIndex);
+
+	/** Returns true if any asynchronous worker is currently accessing the specified slot index. */
+	bool IsSlotBusy(int32 SlotIndex) const;
+
 	int32 GetLoadedChunkCount() const { return CoordinateToSlot.Num(); }
+	int32 GetTotalSlotCount() const { return Slots.Num(); }
 
 private:
 	struct FSlot
@@ -74,6 +84,7 @@ private:
 		TUniquePtr<FVoxelChunk> Chunk;
 		FVoxelChunkCoordinate Coordinate;
 		uint32 Generation = 0;
+		int32 InFlightWorkers = 0;
 		bool bInUse = false;
 	};
 
