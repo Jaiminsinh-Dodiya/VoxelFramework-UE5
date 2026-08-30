@@ -64,14 +64,22 @@ struct FVoxelCompletedMeshItem
 {
 	FVoxelChunkCoordinate Coordinate;
 	int32 SlotIndex = INDEX_NONE;
+	TArray<int32> NeighborSlotIndices;
 	FVoxelMeshData MeshData;
 	double QueueEntryTime = 0.0;
 	bool bIsRemesh = false;
 
 	FVoxelCompletedMeshItem() = default;
-	FVoxelCompletedMeshItem(const FVoxelChunkCoordinate& InCoordinate, int32 InSlotIndex, FVoxelMeshData&& InMeshData, double InQueueEntryTime, bool bInIsRemesh = false)
+	FVoxelCompletedMeshItem(
+		const FVoxelChunkCoordinate& InCoordinate,
+		int32 InSlotIndex,
+		TArray<int32>&& InNeighborSlots,
+		FVoxelMeshData&& InMeshData,
+		double InQueueEntryTime,
+		bool bInIsRemesh = false)
 		: Coordinate(InCoordinate)
 		, SlotIndex(InSlotIndex)
+		, NeighborSlotIndices(MoveTemp(InNeighborSlots))
 		, MeshData(MoveTemp(InMeshData))
 		, QueueEntryTime(InQueueEntryTime)
 		, bIsRemesh(bInIsRemesh)
@@ -150,6 +158,7 @@ public:
 	float GetMaxQueueLatencyMs() const { return MaxQueueLatencyMs; }
 	float GetOldestQueueItemAgeMs() const { return OldestQueueItemAgeMs; }
 	float CalculateQueueLatencyPercentile(float Percentile) const;
+	void ResetLatencyStats();
 
 	void SetMaxComponentPoolSize(int32 InMaxSize) { MaxComponentPoolSize = FMath::Max(0, InMaxSize); }
 	int32 GetMaxComponentPoolSize() const { return MaxComponentPoolSize; }

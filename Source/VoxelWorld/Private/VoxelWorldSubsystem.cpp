@@ -70,6 +70,33 @@ void UVoxelWorldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 void UVoxelWorldSubsystem::Deinitialize()
 {
+	// 1. Flag in-flight cancellation on all active jobs
+	for (auto& Pair : InFlightCancelFlags)
+	{
+		Pair.Value->Store(true);
+	}
+	for (const auto& Pair : InFlightJobHandles)
+	{
+		if (FVoxelRuntimeModule::IsAvailable())
+		{
+			FVoxelRuntimeModule::Get().GetScheduler().RequestCancel(Pair.Value);
+		}
+	}
+
+	// 2. World shutdown barrier: wait for all in-flight workers to exit before resetting storage memory
+	if (FVoxelRuntimeModule::IsAvailable())
+	{
+		const bool bAllTasksFinished = FVoxelRuntimeModule::Get().GetScheduler().WaitForAllTasks(5.0);
+		if (!bAllTasksFinished)
+		{
+			UE_LOG(LogVoxelWorld, Error,
+				TEXT("UVoxelWorldSubsystem::Deinitialize: Background worker tasks did not finish within timeout! Preserving ChunkStore to prevent memory corruption."));
+			Super::Deinitialize();
+			return;
+		}
+	}
+
+	// 3. All background tasks have exited. Safely unload chunks & drain completion queue.
 	ClearAllChunks();
 
 	for (TObjectPtr<UVoxelMeshComponent>& PooledComp : ComponentPool)
@@ -136,7 +163,6 @@ void UVoxelWorldSubsystem::ProcessCompletedMeshQueue(float DeltaTime)
 		TotalQueueLatencyAccumMs += LatencyMs;
 		AverageQueueLatencyMs = static_cast<float>(TotalQueueLatencyAccumMs / TotalFinalizedItemsSampled);
 		MaxQueueLatencyMs = FMath::Max(MaxQueueLatencyMs, LatencyMs);
-		OldestQueueItemAgeMs = LatencyMs;
 
 		QueueLatencyHistory.Add(LatencyMs);
 		if (QueueLatencyHistory.Num() > MaxQueueLatencySamples)
@@ -152,6 +178,10 @@ void UVoxelWorldSubsystem::ProcessCompletedMeshQueue(float DeltaTime)
 			break;
 		}
 	}
+
+	// Accurate Oldest Pending Age via Queue Peek
+	const FVoxelCompletedMeshItem* PeekItem = CompletedMeshQueue.Peek();
+	OldestQueueItemAgeMs = PeekItem ? static_cast<float>((FPlatformTime::Seconds() - PeekItem->QueueEntryTime) * 1000.0) : 0.0f;
 
 	LastFinalizeBudgetUsedMs = static_cast<float>((FPlatformTime::Seconds() - StartSec) * 1000.0);
 	LastFinalizeCount = ProcessedCount;
@@ -169,6 +199,16 @@ float UVoxelWorldSubsystem::CalculateQueueLatencyPercentile(float Percentile) co
 	return Sorted[Index];
 }
 
+void UVoxelWorldSubsystem::ResetLatencyStats()
+{
+	QueueLatencyHistory.Reset();
+	AverageQueueLatencyMs = 0.0f;
+	MaxQueueLatencyMs = 0.0f;
+	OldestQueueItemAgeMs = 0.0f;
+	TotalQueueLatencyAccumMs = 0.0;
+	TotalFinalizedItemsSampled = 0;
+}
+
 void UVoxelWorldSubsystem::FinalizeChunkMesh(FVoxelCompletedMeshItem&& Item)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Voxel_MeshUpload);
@@ -179,13 +219,20 @@ void UVoxelWorldSubsystem::FinalizeChunkMesh(FVoxelCompletedMeshItem&& Item)
 	InFlightCancelFlags.Remove(Coordinate);
 	PendingRemeshCoordinates.Remove(Coordinate);
 
-	// Guard against unloads while work was in flight or queued
+	// Guard against unloads while work was in flight or queued (Stale Result Protection)
 	if (!RequestedCoordinates.Contains(Coordinate))
 	{
 		ChunkStates.Remove(Coordinate);
-		if (ChunkStore && Item.SlotIndex != INDEX_NONE)
+		if (ChunkStore)
 		{
-			ChunkStore->ReleaseWorkerLease(Item.SlotIndex);
+			if (Item.SlotIndex != INDEX_NONE)
+			{
+				ChunkStore->ReleaseWorkerLease(Item.SlotIndex);
+			}
+			for (int32 NSlot : Item.NeighborSlotIndices)
+			{
+				ChunkStore->ReleaseWorkerLease(NSlot);
+			}
 		}
 		return;
 	}
@@ -209,9 +256,16 @@ void UVoxelWorldSubsystem::FinalizeChunkMesh(FVoxelCompletedMeshItem&& Item)
 		Component->SetMeshData(MoveTemp(Item.MeshData));
 	}
 
-	if (ChunkStore && Item.SlotIndex != INDEX_NONE)
+	if (ChunkStore)
 	{
-		ChunkStore->ReleaseWorkerLease(Item.SlotIndex);
+		if (Item.SlotIndex != INDEX_NONE)
+		{
+			ChunkStore->ReleaseWorkerLease(Item.SlotIndex);
+		}
+		for (int32 NSlot : Item.NeighborSlotIndices)
+		{
+			ChunkStore->ReleaseWorkerLease(NSlot);
+		}
 	}
 
 	// Neighbor Arrival Remesh Trigger: ONLY trigger on initial chunk generation (!Item.bIsRemesh),
@@ -258,14 +312,39 @@ FVoxelChunkHandle UVoxelWorldSubsystem::RequestChunk(const FVoxelChunkCoordinate
 	check(SlotIndex != INDEX_NONE);
 
 	FVoxelNeighborChunks Neighbors;
+	TArray<int32> NeighborSlotIndices;
+
 	if (ChunkStore)
 	{
-		Neighbors.NegX = ChunkStore->FindChunkByCoordinate(FVoxelChunkCoordinate(Coordinate.X - 1, Coordinate.Y, Coordinate.Z));
-		Neighbors.PosX = ChunkStore->FindChunkByCoordinate(FVoxelChunkCoordinate(Coordinate.X + 1, Coordinate.Y, Coordinate.Z));
-		Neighbors.NegY = ChunkStore->FindChunkByCoordinate(FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y - 1, Coordinate.Z));
-		Neighbors.PosY = ChunkStore->FindChunkByCoordinate(FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y + 1, Coordinate.Z));
-		Neighbors.NegZ = ChunkStore->FindChunkByCoordinate(FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y, Coordinate.Z - 1));
-		Neighbors.PosZ = ChunkStore->FindChunkByCoordinate(FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y, Coordinate.Z + 1));
+		const FVoxelChunkCoordinate CardinalCoords[6] = {
+			FVoxelChunkCoordinate(Coordinate.X - 1, Coordinate.Y, Coordinate.Z),
+			FVoxelChunkCoordinate(Coordinate.X + 1, Coordinate.Y, Coordinate.Z),
+			FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y - 1, Coordinate.Z),
+			FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y + 1, Coordinate.Z),
+			FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y, Coordinate.Z - 1),
+			FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y, Coordinate.Z + 1)
+		};
+
+		const FVoxelChunk** NeighborPtrs[6] = {
+			&Neighbors.NegX, &Neighbors.PosX,
+			&Neighbors.NegY, &Neighbors.PosY,
+			&Neighbors.NegZ, &Neighbors.PosZ
+		};
+
+		for (int32 i = 0; i < 6; ++i)
+		{
+			const FVoxelChunkCoordinate& NCoord = CardinalCoords[i];
+			// Invariant: Only Ready neighbors are readable. Unready/generating/unloaded neighbors are treated as air.
+			if (IsChunkReady(NCoord))
+			{
+				const int32 NSlot = ChunkStore->AcquireWorkerLease(NCoord);
+				if (NSlot != INDEX_NONE)
+				{
+					*NeighborPtrs[i] = ChunkStore->FindChunkByCoordinate(NCoord);
+					NeighborSlotIndices.Add(NSlot);
+				}
+			}
+		}
 	}
 
 	const int32 CapturedSeed = WorldSeed;
@@ -307,15 +386,17 @@ FVoxelChunkHandle UVoxelWorldSubsystem::RequestChunk(const FVoxelChunkCoordinate
 			}
 		},
 		WorkPriority,
-		[WeakThis, Coordinate, MeshDataResult, SlotIndex]()
+		[WeakThis, Coordinate, MeshDataResult, SlotIndex, NeighborSlotIndices = MoveTemp(NeighborSlotIndices)]() mutable
 		{
 			if (UVoxelWorldSubsystem* StrongThis = WeakThis.Get())
 			{
 				StrongThis->CompletedMeshQueue.Enqueue(FVoxelCompletedMeshItem(
 					Coordinate,
 					SlotIndex,
+					MoveTemp(NeighborSlotIndices),
 					MoveTemp(*MeshDataResult),
-					FPlatformTime::Seconds()
+					FPlatformTime::Seconds(),
+					/*bInIsRemesh=*/false
 				));
 				StrongThis->FinalizationQueueDepth++;
 			}
@@ -349,12 +430,40 @@ void UVoxelWorldSubsystem::RequestRemeshChunk(const FVoxelChunkCoordinate& Coord
 	PendingRemeshCoordinates.Add(Coordinate);
 
 	FVoxelNeighborChunks Neighbors;
-	Neighbors.NegX = ChunkStore->FindChunkByCoordinate(FVoxelChunkCoordinate(Coordinate.X - 1, Coordinate.Y, Coordinate.Z));
-	Neighbors.PosX = ChunkStore->FindChunkByCoordinate(FVoxelChunkCoordinate(Coordinate.X + 1, Coordinate.Y, Coordinate.Z));
-	Neighbors.NegY = ChunkStore->FindChunkByCoordinate(FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y - 1, Coordinate.Z));
-	Neighbors.PosY = ChunkStore->FindChunkByCoordinate(FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y + 1, Coordinate.Z));
-	Neighbors.NegZ = ChunkStore->FindChunkByCoordinate(FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y, Coordinate.Z - 1));
-	Neighbors.PosZ = ChunkStore->FindChunkByCoordinate(FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y, Coordinate.Z + 1));
+	TArray<int32> NeighborSlotIndices;
+
+	if (ChunkStore)
+	{
+		const FVoxelChunkCoordinate CardinalCoords[6] = {
+			FVoxelChunkCoordinate(Coordinate.X - 1, Coordinate.Y, Coordinate.Z),
+			FVoxelChunkCoordinate(Coordinate.X + 1, Coordinate.Y, Coordinate.Z),
+			FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y - 1, Coordinate.Z),
+			FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y + 1, Coordinate.Z),
+			FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y, Coordinate.Z - 1),
+			FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y, Coordinate.Z + 1)
+		};
+
+		const FVoxelChunk** NeighborPtrs[6] = {
+			&Neighbors.NegX, &Neighbors.PosX,
+			&Neighbors.NegY, &Neighbors.PosY,
+			&Neighbors.NegZ, &Neighbors.PosZ
+		};
+
+		for (int32 i = 0; i < 6; ++i)
+		{
+			const FVoxelChunkCoordinate& NCoord = CardinalCoords[i];
+			// Invariant: Only Ready neighbors are readable. Unready/generating/unloaded neighbors are treated as air.
+			if (IsChunkReady(NCoord))
+			{
+				const int32 NSlot = ChunkStore->AcquireWorkerLease(NCoord);
+				if (NSlot != INDEX_NONE)
+				{
+					*NeighborPtrs[i] = ChunkStore->FindChunkByCoordinate(NCoord);
+					NeighborSlotIndices.Add(NSlot);
+				}
+			}
+		}
+	}
 
 	const UVoxelBlockRegistry* CapturedRegistry = BlockRegistry;
 	const float CapturedVoxelWorldSize = VoxelWorldSize;
@@ -376,13 +485,14 @@ void UVoxelWorldSubsystem::RequestRemeshChunk(const FVoxelChunkCoordinate& Coord
 			*MeshDataResult = FVoxelMesher::GenerateMesh(*Chunk, CapturedRegistry, &Neighbors, &Coordinate, CapturedVoxelWorldSize);
 		},
 		WorkPriority,
-		[WeakThis, Coordinate, MeshDataResult, SlotIndex]()
+		[WeakThis, Coordinate, MeshDataResult, SlotIndex, NeighborSlotIndices = MoveTemp(NeighborSlotIndices)]() mutable
 		{
 			if (UVoxelWorldSubsystem* StrongThis = WeakThis.Get())
 			{
 				StrongThis->CompletedMeshQueue.Enqueue(FVoxelCompletedMeshItem(
 					Coordinate,
 					SlotIndex,
+					MoveTemp(NeighborSlotIndices),
 					MoveTemp(*MeshDataResult),
 					FPlatformTime::Seconds(),
 					/*bInIsRemesh=*/true
@@ -563,9 +673,16 @@ void UVoxelWorldSubsystem::ClearAllChunks()
 	FVoxelCompletedMeshItem DroppedItem;
 	while (CompletedMeshQueue.Dequeue(DroppedItem))
 	{
-		if (ChunkStore && DroppedItem.SlotIndex != INDEX_NONE)
+		if (ChunkStore)
 		{
-			ChunkStore->ReleaseWorkerLease(DroppedItem.SlotIndex);
+			if (DroppedItem.SlotIndex != INDEX_NONE)
+			{
+				ChunkStore->ReleaseWorkerLease(DroppedItem.SlotIndex);
+			}
+			for (int32 NSlot : DroppedItem.NeighborSlotIndices)
+			{
+				ChunkStore->ReleaseWorkerLease(NSlot);
+			}
 		}
 	}
 	FinalizationQueueDepth = 0;
