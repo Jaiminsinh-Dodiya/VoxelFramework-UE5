@@ -37,13 +37,19 @@ VoxelStorage      — chunk pool + voxel buffer. depends on VoxelCore, VoxelRunt
 VoxelGeneration   — generation pass pipeline. depends on VoxelMath, VoxelAssets, VoxelStorage, VoxelRuntime.
 VoxelMeshing      — greedy meshing + AO. depends on VoxelStorage, VoxelAssets, VoxelRuntime.
 VoxelRendering    — custom UMeshComponent + FPrimitiveSceneProxy. depends on VoxelMeshing.
-VoxelWorld        — async world subsystem. depends on VoxelCore, VoxelRuntime, VoxelAssets, VoxelStorage, VoxelGeneration, VoxelMeshing, VoxelRendering.
-VoxelDebug        — 5-mode preview tool. depends on VoxelGeneration, VoxelMeshing, VoxelStorage, VoxelAssets, VoxelRendering, VoxelWorld.
+VoxelPhysics      — collision builder + UVoxelCollisionComponent + Chaos cooking. depends on VoxelCore, VoxelStorage, VoxelAssets, VoxelRuntime.
+VoxelWorld        — async world subsystem. depends on VoxelCore, VoxelRuntime, VoxelAssets, VoxelStorage, VoxelGeneration, VoxelMeshing, VoxelRendering, VoxelPhysics.
+VoxelStreaming    — 4-band distance manager + adaptive frame budget. depends on VoxelCore, VoxelRuntime, VoxelWorld.
+VoxelDebug        — 5-mode preview tool + 10 Hz live HUD telemetry. depends on all runtime modules.
 ```
 
-Nothing above `VoxelStorage` in this list knows anything about generation, meshing, or rendering exists. `VoxelStorage` doesn't know `VoxelGeneration` or `VoxelMeshing` exist either — both are *consumers* of storage. Critically, **`VoxelMeshing` does not depend on `VoxelGeneration`** — it only needs a finished `FVoxelChunk`, regardless of how that chunk's contents were produced. This is what makes the ADR-004 separation real rather than aspirational: you could hand `FVoxelMesher::GenerateMesh` a hand-authored chunk (as several automation tests do) and it works identically.
+Nothing above `VoxelStorage` in this list knows anything about generation, meshing, rendering, or physics. `VoxelStorage` doesn't know `VoxelGeneration`, `VoxelMeshing`, or `VoxelPhysics` exist either — all are *consumers* of storage. Critically, **`VoxelMeshing` and `VoxelPhysics` do not depend on `VoxelGeneration`** — they only need a finished `FVoxelChunk`.
 
-**`VoxelRendering` does not depend on `VoxelGeneration`** either — it only needs `FVoxelMeshData` (plain CPU arrays from `VoxelMeshing`). **`VoxelWorld`** is the integration point that ties all layers together: it owns `FVoxelChunkStore`, dispatches generation+meshing to worker threads via `FVoxelScheduler`, and marshals results back to the Game Thread to create `UVoxelMeshComponent` instances.
+**`VoxelRendering` and `VoxelPhysics` are completely decoupled from each other** per ADR-006:
+- `VoxelRendering` produces GPU scene proxies for visual rendering up to `RenderDistance`.
+- `VoxelPhysics` produces Chaos physics bodies for character collisions up to `SimulationDistance`.
+
+**`VoxelWorld`** is the integration point that ties all layers together: it owns `FVoxelChunkStore`, dispatches generation, meshing, and collision to worker threads via `FVoxelScheduler`, and marshals results back to the Game Thread to create `UVoxelMeshComponent` and `UVoxelCollisionComponent` instances.
 
 See `README.md` for the rendered Mermaid dependency graph.
 
@@ -61,25 +67,31 @@ The task scheduler wrapper and Project Settings — "process-wide services every
 Deliberately the only module allowed to know what noise is. `VoxelStorage` explicitly does **not** depend on this.
 
 ### VoxelAssets
-The bridge between "designer-authored content" and "fast runtime lookup." `UVoxelBlockRegistry::PrecacheBiomeLayers` is the one-time Game-Thread bridge; everything after that is worker-thread-safe array indexing — a pattern both `VoxelGeneration` and `VoxelMeshing` rely on (meshing uses `FindDefinition` for material/tint resolution, the same read-only registry).
+The bridge between "designer-authored content" and "fast runtime lookup." `UVoxelBlockRegistry::PrecacheBiomeLayers` is the one-time Game-Thread bridge; everything after that is worker-thread-safe array indexing — a pattern `VoxelGeneration`, `VoxelMeshing`, and `VoxelPhysics` rely on.
 
 ### VoxelStorage
-The actual "world data" module. Deliberately dumb. Zero opinion on where the data came from or what happens to it next — meshing reads it the same way generation writes it, through the same plain `GetBlock`/`SetBlock` interface.
+The actual "world data" module. Deliberately dumb. Zero opinion on where the data came from or what happens to it next — meshing and collision read it through the same plain `GetBlock` interface.
 
 ### VoxelGeneration
 The only module that's allowed to be "smart" about *why* a voxel is what it is.
 
 ### VoxelMeshing
-The only module that's allowed to be "smart" about *how to draw* what's there — and nothing more. It doesn't know what a biome is, what a cave is, or that regions might exist someday. Its contract is exactly `FVoxelChunk → FVoxelMeshData`, proven literally true by the fact that its automation tests construct chunks by hand (`Chunk.SetBlock(...)`) with zero involvement from `VoxelGeneration` at all. This is where ADR-004's "meshing and rendering are separate" half also got proven, not just declared: `FVoxelMeshData` is genuinely renderer-agnostic plain data, and the debug tool's `UProceduralMeshComponent` consumption of it (an explicit, documented exception — see §6) demonstrates that any consumer can sit on top without `VoxelMeshing` itself changing.
+The only module that's allowed to be "smart" about *how to draw* what's there — and nothing more. Its contract is exactly `FVoxelChunk → FVoxelMeshData`.
 
 ### VoxelRendering
-The production rendering path per ADR-004. `UVoxelMeshComponent` creates a custom `FVoxelMeshSceneProxy` that uploads `FVoxelMeshData` to GPU vertex/index buffers. Knows nothing about generation, biomes, or chunks — only plain mesh data.
+The production rendering path per ADR-004. `UVoxelMeshComponent` creates a custom `FVoxelMeshSceneProxy` that uploads `FVoxelMeshData` to GPU vertex/index buffers. Knows nothing about physics, generation, or biomes.
+
+### VoxelPhysics
+The production collision path per ADR-006. `FVoxelCollisionBuilder` builds an immutable `FVoxelCollisionData` snapshot on worker threads (filtering non-collidable blocks), and `UVoxelCollisionComponent` implements `IInterface_CollisionDataProvider` to cook Chaos physics meshes asynchronously off the Game Thread.
 
 ### VoxelWorld
-The integration point. `UVoxelWorldSubsystem` owns the real `FVoxelChunkStore`, calls `UVoxelBlockRegistry::PrecacheBiomeLayers` once at initialize, and dispatches generation+meshing through `FVoxelScheduler` rather than synchronous calls. This is the piece `VoxelDebug` previously faked by hand — now built, tested, and visually validated.
+The integration point. `UVoxelWorldSubsystem` owns the real `FVoxelChunkStore`, dispatches generation, meshing, and collision through `FVoxelScheduler`, manages completion queues, worker leases, and pooled visual components.
+
+### VoxelStreaming
+The distance-driven scheduler. Runs on Game Thread Tick, evaluates 4 distance bands (`Simulation`, `Render`, `Generation`, `Persistence`), and requests/unloads chunks and collision within adaptive frame time budgets.
 
 ### VoxelDebug
-Exists specifically to answer "does this look right" — now covering five modes: cube preview (ISMC), PMC mesh preview, real renderer preview (UVoxelMeshComponent), async subsystem round-trip test, and per-chunk validation with Output Log PASS/FAIL. See §6 for why `UProceduralMeshComponent` is allowed here specifically.
+Exists specifically to answer "does this look right and perform within budget" — covering five preview modes and real-time on-screen telemetry.
 
 ---
 
