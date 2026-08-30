@@ -18,6 +18,7 @@ public class VoxelWorld : ModuleRules
 			"VoxelGeneration",
 			"VoxelMeshing",
 			"VoxelRendering",
+			"VoxelPhysics",
 			"DeveloperSettings", // UVoxelWorldSettings
 		});
 	}
