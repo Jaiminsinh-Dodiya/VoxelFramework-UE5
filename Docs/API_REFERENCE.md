@@ -222,6 +222,49 @@ Custom scene proxy that uploads `FVoxelMeshData` to GPU vertex/index buffers usi
 
 This is the production rendering path per ADR-004 — `FVoxelMeshData` (plain CPU arrays from VoxelMeshing) is consumed here and turned into GPU-visible geometry without VoxelMeshing knowing anything about rendering.
 
+## VoxelPhysics
+
+Header: `VoxelPhysicsTypes.h`
+
+### EVoxelCollisionMode (enum class)
+- `None`: No physical collision generated
+- `Complex`: High-fidelity triangle collision for character gameplay
+
+### EVoxelCollisionState (enum class)
+- `NotRequired`: Outside simulation distance
+- `Queued`: Dispatched/waiting for worker generation
+- `Building`: Worker thread actively computing collision geometry
+- `Cooking`: Game Thread / Chaos physics worker cooking `UBodySetup`
+- `Ready`: Cooked and registered in Chaos `FPhysScene`
+- `Unloading`: Teardown
+
+Header: `VoxelCollisionData.h`
+
+### FVoxelCollisionData (struct)
+- `Vertices`: `TArray<FVector3f>`
+- `Indices`: `TArray<FTriIndices>`
+- `Bounds`: `FBox`
+- `Coordinate`: `FVoxelChunkCoordinate`
+- `CollisionRevision`: `uint32`
+- `bIsEmpty`: `bool`
+- `IsEmpty() const -> bool`
+- `GetTriangleCount() const -> int32`
+- `GetVertexCount() const -> int32`
+
+Header: `VoxelCollisionBuilder.h`
+
+### FVoxelCollisionBuilder
+- `static BuildCollisionData(...) -> FVoxelCollisionData`: Pure worker-side greedy collision builder with neighbor face culling and block solidity filtering.
+
+Header: `VoxelCollisionComponent.h`
+
+### UVoxelCollisionComponent (UCLASS)
+Parent: `UPrimitiveComponent`, `IInterface_CollisionDataProvider`, ClassGroup=`VoxelPhysics`.
+- `SetCollisionData(FVoxelCollisionData&& InCollisionData, bool bAsyncCook = true)`: Installs collision snapshot and triggers Chaos physics cooking.
+- `ClearCollisionData()`: Tears down active physics state.
+- `HasActiveCollision() const -> bool`
+- `GetCurrentCollisionRevision() const -> uint32`
+
 ## VoxelWorld
 
 Header: `VoxelWorldSubsystem.h`
@@ -257,6 +300,18 @@ EVoxelChunkState GetChunkState(const FVoxelChunkCoordinate& Coordinate) const;
 
 void RequestRemeshChunk(const FVoxelChunkCoordinate& Coordinate, EVoxelWorkPriority WorkPriority = EVoxelWorkPriority::Normal);
 // Asynchronously remeshes an existing ready chunk to update boundary seams without re-generating voxels.
+
+void RequestChunkCollision(const FVoxelChunkCoordinate& Coordinate, EVoxelWorkPriority WorkPriority = EVoxelWorkPriority::High);
+// Requests physical collision generation and Chaos cooking for an existing resident chunk.
+
+void UnloadChunkCollision(const FVoxelChunkCoordinate& Coordinate);
+// Unloads and destroys collision representation for a chunk.
+
+EVoxelCollisionState GetChunkCollisionState(const FVoxelChunkCoordinate& Coordinate) const;
+// Returns current collision lifecycle state for a chunk coordinate.
+
+bool HasChunkCollision(const FVoxelChunkCoordinate& Coordinate) const;
+// Returns true if chunk currently has registered active physical collision.
 
 void SetChunkVisible(const FVoxelChunkCoordinate& Coordinate, bool bVisible);
 // Toggles mesh component visibility.
