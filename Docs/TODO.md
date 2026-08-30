@@ -89,15 +89,42 @@ See [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md) §9 for the current honest li
 - [x] **Automation Test Suite (23/23 Passing)**:
   - Added `Voxel.Meshing.NeighborBoundaryCulling` validating exact 36-byte layout and cross-chunk internal boundary face culling.
 
-## Then: VoxelSerialization
+## Just completed: Phase 6.4 Final Concurrency, Lifetime & Release-Hardening Pass ✅
 
-- [ ] Diff-based save/load using `FVoxelChunk::GetModifications()` / `ApplyModifications()` — the data model already exists (`ADR-005`), the save format and file I/O don't
-- [ ] Never serialize untouched chunks — regenerate from seed on load
-- [ ] Must never block the Game Thread
+- [x] **6.4.1 Scheduler Terminal Completion Guarantee**:
+  - Guaranteed `OnComplete` runs exactly once across all completion and cancellation paths (queued-cancel, running-cancel, completed).
+  - Ensured external resource and lease cleanup is 100% leak-proof across all job lifecycles.
+- [x] **6.4.2 Chunk & Neighbor Lifetime Safety & Immutability**:
+  - Implemented worker leases for all cardinal neighbors during meshing (`AcquireWorkerLease` on all ready neighbors).
+  - Enforced snapshot invariant: Only `Ready` neighbors are readable; `Generating`, `Unready`, or `Unloaded` neighbors are treated as air.
+  - Unloading a neighbor chunk while a worker is meshing preserves its slot memory without recycling until all active worker leases drop to 0.
+- [x] **6.4.3 Component Pool Stale-Result Protection**:
+  - Guarded `FinalizeChunkMesh` against stale completions from unloaded chunks. Stale mesh results are safely discarded without touching reassigned pooled components.
+- [x] **6.4.4 World Shutdown Barrier**:
+  - Implemented `FVoxelScheduler::WaitForAllTasks` in `UVoxelWorldSubsystem::Deinitialize`.
+  - Shutdown sequence: Stop new work $\rightarrow$ flag cancellation $\rightarrow$ wait for active tasks $\rightarrow$ drain queue and release leases $\rightarrow$ destroy components $\rightarrow$ safely reset storage.
+  - If timeout occurs, logs fatal development error and preserves storage to prevent memory corruption.
+- [x] **6.4.5 Bounded JobStates History**:
+  - Configured bounded historical retention (`MaxRetainedCompletedJobStates = 8192`) in `FVoxelScheduler` to eliminate memory growth over long-running play sessions. Active/Queued/Running jobs are never evicted.
+- [x] **6.4.6 Queue Telemetry Correctness & Reset**:
+  - Distinguishes Dequeued Item Latency (Avg, P50, P95, P99, Max) from Oldest Pending Queue Item Age (via queue peek).
+  - `ResetDiagnosticStats()` cleanly clears subsystem latency windows.
+- [x] **6.4.7 Automation Tests (28/28 Passing)**:
+  - `Voxel.Streaming.SchedulerTerminalCompletion` (queued cancel, duplicate cancel, post-completion cancel)
+  - `Voxel.Streaming.NeighborLifetimeSafety` (neighbor lease retention during unload and delayed recycling)
+  - `Voxel.Streaming.SchedulerBoundedHistory` (2,000-job historical bounded retention)
+  - `Voxel.Streaming.LongRunStress` (1,000-iteration rapid boundary crossing, churn, and slot stability)
 
-## Then: VoxelEditor
+---
 
-- [ ] World/noise/biome preview tools (beyond what `VoxelDebug` already does)
+## 🔒 Low-Level Runtime Freeze & Next Product Phase
+
+With Phase 6.4 complete, the low-level runtime (`VoxelCore`, `VoxelRuntime`, `VoxelMath`, `VoxelAssets`, `VoxelStorage`, `VoxelGeneration`, `VoxelMeshing`, `VoxelRendering`, `VoxelWorld`, `VoxelStreaming`, `VoxelDebug`) is **airtight and frozen**.
+
+### Serialization Product Decision:
+- `VoxelSerialization` (diff-based persistent terrain modification) is an explicit opt-in choice.
+- If the game does not support freeform terrain mining/digging (e.g., Minecraft-style), terrain regenerates deterministically from seed + world parameters, and the game's SaveGame system handles player progress, bosses, camps, and quest state. Terrain block-diff serialization is deferred/skipped for v1.
+
 - [ ] Chunk inspector, memory profiler, streaming visualizer
 - [ ] Deliberately last — editor tooling complexity tends to balloon if started too early
 

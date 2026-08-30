@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 1,
-	"VersionName": "2.0.0",
+	"Version": 2,
+	"VersionName": "2.2.0",
 	"FriendlyName": "Voxel Framework",
 	"Description": "Modular, data-driven voxel world framework. See Docs/ADR.md for architecture decisions.",
 	"Category": "Voxel",
@@ -11,7 +11,7 @@
 	"MarketplaceURL": "",
 	"SupportURL": "",
 	"CanContainContent": true,
-	"IsBetaVersion": true,
+	"IsBetaVersion": false,
 	"IsExperimentalVersion": false,
 	"Installed": false,
 	"Modules": [
