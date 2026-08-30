@@ -990,11 +990,12 @@ bool AVoxelDebugVisualizer::DiagnosticsTick(float DeltaTime)
 		FString::Printf(TEXT("  Component Pool: Active: %d | Pooled: %d (Peak: %d) | Created: %d | Reused: %d | Destroyed: %d"),
 			ActiveCompCount, PooledCompCount, PeakPoolCount, CreatedCompCount, ReusedCompCount, DestroyedCompCount));
 
-	// Line 8: Chunk Residency
+	// Line 8: Chunk Residency & Collision
+	const int32 ActiveCollisionCount = Subsystem ? Subsystem->GetActiveCollisionComponentCount() : 0;
 	GEngine->AddOnScreenDebugMessage(
 		GetDiagnosticsKey(8), DisplayDuration, ColorWhite,
-		FString::Printf(TEXT("  Chunks: %d Managed | %d Ready | %d Visible (Non-Nanite Casters)"),
-			ManagedCount, ReadyCount, VisibleCount));
+		FString::Printf(TEXT("  Chunks: %d Managed | %d Ready | %d Visible | %d Collision"),
+			ManagedCount, ReadyCount, VisibleCount, ActiveCollisionCount));
 
 	// Line 9: Memory Footprint
 	GEngine->AddOnScreenDebugMessage(

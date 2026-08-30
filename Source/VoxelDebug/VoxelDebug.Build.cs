@@ -17,6 +17,7 @@ public class VoxelDebug : ModuleRules
 			"VoxelAssets",
 			"VoxelMeshing",              // real greedy-meshed preview mode (PMC)
 			"VoxelRendering",            // real renderer preview mode (UVoxelMeshComponent)
+			"VoxelPhysics",              // physics collision component inspection
 			"VoxelWorld",                // subsystem integration test (RequestChunksViaSubsystem)
 			"VoxelStreaming",            // live diagnostics stats (UVoxelStreamingManager)
 			"VoxelRuntime",              // transitive dependency of VoxelWorld
