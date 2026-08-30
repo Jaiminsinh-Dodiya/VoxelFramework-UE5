@@ -783,6 +783,14 @@ void AVoxelDebugVisualizer::ResetDiagnosticStats()
 	MaxFrameTimeMs = 0.0f;
 	TotalFrameTimeAccumMs = 0.0f;
 	TotalFramesSampled = 0;
+
+	if (UWorld* World = GetWorld())
+	{
+		if (UVoxelWorldSubsystem* Subsystem = World->GetSubsystem<UVoxelWorldSubsystem>())
+		{
+			Subsystem->ResetLatencyStats();
+		}
+	}
 }
 
 float AVoxelDebugVisualizer::CalculatePercentile(float Percentile) const
@@ -970,11 +978,11 @@ bool AVoxelDebugVisualizer::DiagnosticsTick(float DeltaTime)
 		FString::Printf(TEXT("  GT Mesh Finalize: %.2f ms / Budget: %.2f ms | Finalized: %d chunks | Pending Finalize Queue: %d"),
 			LastFinalizeMs, RenderSubmissionBudgetLimitMs, LastFinalizeCount, FinalizeQueueDepth));
 
-	// Line 6: Finalization Queue Latency
+	// Line 6: Finalization Queue Telemetry (Oldest Pending Age vs Dequeued Latency)
 	GEngine->AddOnScreenDebugMessage(
 		GetDiagnosticsKey(6), DisplayDuration, (AvgQueueLatencyMs <= 33.3f) ? ColorGreen : ColorYellow,
-		FString::Printf(TEXT("  Finalize Queue Latency: Avg: %.1f ms | P50: %.1f ms | P95: %.1f ms | P99: %.1f ms | Max: %.1f ms | Oldest: %.1f ms"),
-			AvgQueueLatencyMs, P50QueueLatencyMs, P95QueueLatencyMs, P99QueueLatencyMs, MaxQueueLatencyMs, OldestItemAgeMs));
+		FString::Printf(TEXT("  Finalize Queue: Depth: %d | Oldest Pending: %.1f ms | Dequeued Latency (Avg: %.1f ms, P50: %.1f ms, P95: %.1f ms, Max: %.1f ms)"),
+			FinalizeQueueDepth, OldestItemAgeMs, AvgQueueLatencyMs, P50QueueLatencyMs, P95QueueLatencyMs, MaxQueueLatencyMs));
 
 	// Line 7: Component Pool Telemetry
 	GEngine->AddOnScreenDebugMessage(
