@@ -10,6 +10,9 @@
 #include "VoxelMesher.h"
 #include "VoxelMeshData.h"
 #include "VoxelMeshComponent.h"
+#include "VoxelCollisionComponent.h"
+#include "VoxelCollisionBuilder.h"
+#include "VoxelPhysicsTypes.h"
 #include "VoxelRuntimeModule.h"
 #include "VoxelScheduler.h"
 #include "VoxelRuntimeSettings.h"
@@ -127,6 +130,7 @@ UVoxelWorldSubsystem::~UVoxelWorldSubsystem()
 void UVoxelWorldSubsystem::Tick(float DeltaTime)
 {
 	ProcessCompletedMeshQueue(DeltaTime);
+	ProcessCompletedCollisionQueue(DeltaTime);
 }
 
 TStatId UVoxelWorldSubsystem::GetStatId() const
@@ -209,6 +213,114 @@ void UVoxelWorldSubsystem::ResetLatencyStats()
 	TotalFinalizedItemsSampled = 0;
 }
 
+void UVoxelWorldSubsystem::ProcessCompletedCollisionQueue(float DeltaTime)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Voxel_GTFinalizeCollision);
+
+	if (FinalizationCollisionQueueDepth.Load() <= 0)
+	{
+		return;
+	}
+
+	const double StartSec = FPlatformTime::Seconds();
+	const double BudgetSec = RenderSubmissionBudgetMs * 0.001;
+	const int32 MaxItemsPerTick = 4;
+	int32 ProcessedCount = 0;
+
+	FVoxelCompletedCollisionItem Item;
+	while (CompletedCollisionQueue.Dequeue(Item))
+	{
+		FinalizationCollisionQueueDepth--;
+		FinalizeChunkCollision(MoveTemp(Item));
+		ProcessedCount++;
+
+		if ((FPlatformTime::Seconds() - StartSec) >= BudgetSec || ProcessedCount >= MaxItemsPerTick)
+		{
+			break;
+		}
+	}
+}
+
+void UVoxelWorldSubsystem::FinalizeChunkCollision(FVoxelCompletedCollisionItem&& Item)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Voxel_CollisionUpload);
+	check(IsInGameThread());
+
+	const FVoxelChunkCoordinate Coordinate = Item.Coordinate;
+	InFlightCollisionJobHandles.Remove(Coordinate);
+	InFlightCollisionCancelFlags.Remove(Coordinate);
+
+	// Stale / unload verification
+	const uint32 ActiveRevision = ChunkCollisionRevisions.FindRef(Coordinate);
+	if (!RequestedCoordinates.Contains(Coordinate) || Item.CollisionRevision != ActiveRevision)
+	{
+		if (ChunkStore)
+		{
+			if (Item.SlotIndex != INDEX_NONE)
+			{
+				ChunkStore->ReleaseWorkerLease(Item.SlotIndex);
+			}
+			for (int32 NSlot : Item.NeighborSlotIndices)
+			{
+				ChunkStore->ReleaseWorkerLease(NSlot);
+			}
+		}
+		return;
+	}
+
+	if (Item.CollisionData.IsEmpty())
+	{
+		CollisionStates.Add(Coordinate, EVoxelCollisionState::Ready);
+		if (TWeakObjectPtr<UVoxelCollisionComponent>* ExistingComp = ChunkCollisionComponents.Find(Coordinate))
+		{
+			if (ExistingComp->IsValid())
+			{
+				ExistingComp->Get()->ClearCollisionData();
+			}
+		}
+	}
+	else
+	{
+		UVoxelCollisionComponent* Component = GetOrCreateCollisionComponent(Coordinate);
+		Component->OnCollisionCookFinished.RemoveAll(this);
+		Component->OnCollisionCookFinished.AddUObject(this, &UVoxelWorldSubsystem::HandleCollisionCookFinished, Coordinate);
+		Component->SetCollisionData(MoveTemp(Item.CollisionData), /*bAsyncCook=*/ true);
+		CollisionStates.Add(Coordinate, EVoxelCollisionState::Cooking);
+	}
+
+	if (ChunkStore)
+	{
+		if (Item.SlotIndex != INDEX_NONE)
+		{
+			ChunkStore->ReleaseWorkerLease(Item.SlotIndex);
+		}
+		for (int32 NSlot : Item.NeighborSlotIndices)
+		{
+			ChunkStore->ReleaseWorkerLease(NSlot);
+		}
+	}
+}
+
+void UVoxelWorldSubsystem::HandleCollisionCookFinished(UVoxelCollisionComponent* Comp, bool bSuccess, uint32 Revision, FVoxelChunkCoordinate Coordinate)
+{
+	check(IsInGameThread());
+
+	// If chunk was unloaded, cancelled, or revision superseded while cooking was in-flight, discard
+	if (!RequestedCoordinates.Contains(Coordinate) || ChunkCollisionRevisions.FindRef(Coordinate) != Revision)
+	{
+		return;
+	}
+
+	if (bSuccess)
+	{
+		CollisionStates.Add(Coordinate, EVoxelCollisionState::Ready);
+	}
+	else
+	{
+		CollisionStates.Add(Coordinate, EVoxelCollisionState::Failed);
+	}
+}
+
 void UVoxelWorldSubsystem::FinalizeChunkMesh(FVoxelCompletedMeshItem&& Item)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Voxel_MeshUpload);
@@ -239,6 +351,12 @@ void UVoxelWorldSubsystem::FinalizeChunkMesh(FVoxelCompletedMeshItem&& Item)
 
 	ReadyCoordinates.Add(Coordinate);
 	ChunkStates.Add(Coordinate, EVoxelChunkState::Ready);
+
+	// If collision was queued waiting for generation to finish, kick off collision build now
+	if (GetChunkCollisionState(Coordinate) == EVoxelCollisionState::Queued)
+	{
+		RequestChunkCollision(Coordinate, EVoxelWorkPriority::High);
+	}
 
 	// In CPU-only Mode C, we bypass render component creation and GPU work
 	if (!bCpuOnlyMode && !Item.MeshData.IsEmpty())
@@ -594,6 +712,8 @@ void UVoxelWorldSubsystem::UnloadChunk(const FVoxelChunkCoordinate& Coordinate, 
 		ChunkMeshComponents.Remove(Coordinate);
 	}
 
+	UnloadChunkCollision(Coordinate);
+
 	ChunkStates.Add(Coordinate, EVoxelChunkState::Unloading);
 	RequestedCoordinates.Remove(Coordinate);
 	ReadyCoordinates.Remove(Coordinate);
@@ -649,6 +769,201 @@ void UVoxelWorldSubsystem::SetCastShadows(bool bInCastShadows)
 	}
 }
 
+void UVoxelWorldSubsystem::RequestChunkCollision(const FVoxelChunkCoordinate& Coordinate, EVoxelWorkPriority WorkPriority)
+{
+	check(IsInGameThread());
+
+	if (!ReadyCoordinates.Contains(Coordinate))
+	{
+		if (RequestedCoordinates.Contains(Coordinate))
+		{
+			CollisionStates.Add(Coordinate, EVoxelCollisionState::Queued);
+		}
+		return;
+	}
+
+	if (InFlightCollisionJobHandles.Contains(Coordinate) || !ChunkStore)
+	{
+		return;
+	}
+
+	const FVoxelChunk* Chunk = ChunkStore->FindChunkByCoordinate(Coordinate);
+	if (!Chunk || Chunk->IsEmpty())
+	{
+		CollisionStates.Add(Coordinate, EVoxelCollisionState::Ready);
+		return;
+	}
+
+	const int32 SlotIndex = ChunkStore->AcquireWorkerLease(Coordinate);
+	if (SlotIndex == INDEX_NONE)
+	{
+		return;
+	}
+
+	uint32& RevisionRef = ChunkCollisionRevisions.FindOrAdd(Coordinate);
+	++RevisionRef;
+	const uint32 CurrentRevision = RevisionRef;
+
+	CollisionStates.Add(Coordinate, EVoxelCollisionState::Building);
+
+	FVoxelNeighborChunks Neighbors;
+	TArray<int32> NeighborSlotIndices;
+
+	if (ChunkStore)
+	{
+		const FVoxelChunkCoordinate CardinalCoords[6] = {
+			FVoxelChunkCoordinate(Coordinate.X - 1, Coordinate.Y, Coordinate.Z),
+			FVoxelChunkCoordinate(Coordinate.X + 1, Coordinate.Y, Coordinate.Z),
+			FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y - 1, Coordinate.Z),
+			FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y + 1, Coordinate.Z),
+			FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y, Coordinate.Z - 1),
+			FVoxelChunkCoordinate(Coordinate.X, Coordinate.Y, Coordinate.Z + 1)
+		};
+
+		const FVoxelChunk** NeighborPtrs[6] = {
+			&Neighbors.NegX, &Neighbors.PosX,
+			&Neighbors.NegY, &Neighbors.PosY,
+			&Neighbors.NegZ, &Neighbors.PosZ
+		};
+
+		for (int32 i = 0; i < 6; ++i)
+		{
+			const FVoxelChunkCoordinate& NCoord = CardinalCoords[i];
+			if (IsChunkReady(NCoord))
+			{
+				const int32 NSlot = ChunkStore->AcquireWorkerLease(NCoord);
+				if (NSlot != INDEX_NONE)
+				{
+					*NeighborPtrs[i] = ChunkStore->FindChunkByCoordinate(NCoord);
+					NeighborSlotIndices.Add(NSlot);
+				}
+			}
+		}
+	}
+
+	const UVoxelBlockRegistry* CapturedRegistry = BlockRegistry;
+	const float CapturedVoxelWorldSize = VoxelWorldSize;
+	TWeakObjectPtr<UVoxelWorldSubsystem> WeakThis(this);
+
+	TSharedRef<FVoxelCollisionData, ESPMode::ThreadSafe> CollisionDataResult = MakeShared<FVoxelCollisionData, ESPMode::ThreadSafe>();
+	TSharedRef<TAtomic<bool>, ESPMode::ThreadSafe> CancelFlag = MakeShared<TAtomic<bool>, ESPMode::ThreadSafe>(false);
+	InFlightCollisionCancelFlags.Add(Coordinate, CancelFlag);
+
+	const FVoxelJobHandle JobHandle = FVoxelRuntimeModule::Get().GetScheduler().Submit(
+		[Chunk, CapturedRegistry, Neighbors, Coordinate, CapturedVoxelWorldSize, CurrentRevision, CollisionDataResult, CancelFlag]()
+		{
+			if (CancelFlag->Load())
+			{
+				return;
+			}
+
+			TRACE_CPUPROFILER_EVENT_SCOPE(Voxel_WorkerCollisionBuild);
+			*CollisionDataResult = FVoxelCollisionBuilder::BuildCollisionData(
+				*Chunk, CapturedRegistry, &Neighbors, &Coordinate, CapturedVoxelWorldSize, CurrentRevision, EVoxelCollisionMode::Complex);
+		},
+		WorkPriority,
+		[WeakThis, Coordinate, CollisionDataResult, SlotIndex, NeighborSlotIndices = MoveTemp(NeighborSlotIndices), CurrentRevision]() mutable
+		{
+			if (UVoxelWorldSubsystem* StrongThis = WeakThis.Get())
+			{
+				StrongThis->CompletedCollisionQueue.Enqueue(FVoxelCompletedCollisionItem(
+					Coordinate,
+					SlotIndex,
+					MoveTemp(NeighborSlotIndices),
+					MoveTemp(*CollisionDataResult),
+					FPlatformTime::Seconds(),
+					CurrentRevision
+				));
+				StrongThis->FinalizationCollisionQueueDepth++;
+			}
+		});
+
+	InFlightCollisionJobHandles.Add(Coordinate, JobHandle);
+}
+
+void UVoxelWorldSubsystem::UnloadChunkCollision(const FVoxelChunkCoordinate& Coordinate)
+{
+	check(IsInGameThread());
+
+	if (TSharedRef<TAtomic<bool>, ESPMode::ThreadSafe>* CancelFlag = InFlightCollisionCancelFlags.Find(Coordinate))
+	{
+		(*CancelFlag)->Store(true);
+	}
+	InFlightCollisionCancelFlags.Remove(Coordinate);
+
+	if (FVoxelJobHandle* JobHandle = InFlightCollisionJobHandles.Find(Coordinate))
+	{
+		if (FVoxelRuntimeModule::IsAvailable())
+		{
+			FVoxelRuntimeModule::Get().GetScheduler().RequestCancel(*JobHandle);
+		}
+	}
+	InFlightCollisionJobHandles.Remove(Coordinate);
+
+	if (TWeakObjectPtr<UVoxelCollisionComponent>* CompPtr = ChunkCollisionComponents.Find(Coordinate))
+	{
+		if (CompPtr->IsValid())
+		{
+			UVoxelCollisionComponent* Comp = CompPtr->Get();
+			Comp->ClearCollisionData();
+			Comp->DestroyComponent();
+		}
+		ChunkCollisionComponents.Remove(Coordinate);
+	}
+
+	CollisionStates.Remove(Coordinate);
+	ChunkCollisionRevisions.Remove(Coordinate);
+}
+
+UVoxelCollisionComponent* UVoxelWorldSubsystem::GetOrCreateCollisionComponent(const FVoxelChunkCoordinate& Coordinate)
+{
+	check(IsInGameThread());
+
+	if (TWeakObjectPtr<UVoxelCollisionComponent>* ExistingPtr = ChunkCollisionComponents.Find(Coordinate))
+	{
+		if (ExistingPtr->IsValid())
+		{
+			return ExistingPtr->Get();
+		}
+	}
+
+	if (!RenderHostActor)
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.ObjectFlags |= RF_Transient;
+		RenderHostActor = GetWorld()->SpawnActor<AVoxelWorldRenderActor>(SpawnParams);
+		check(RenderHostActor);
+	}
+
+	UVoxelCollisionComponent* Component = NewObject<UVoxelCollisionComponent>(RenderHostActor,
+		*FString::Printf(TEXT("ChunkCollision_%d_%d_%d"), Coordinate.X, Coordinate.Y, Coordinate.Z));
+	Component->SetMobility(EComponentMobility::Movable);
+	Component->SetRelativeLocation(FVector::ZeroVector);
+	Component->SetupAttachment(RenderHostActor->GetRootComponent());
+	Component->RegisterComponent();
+
+	ChunkCollisionComponents.Add(Coordinate, Component);
+	return Component;
+}
+
+EVoxelCollisionState UVoxelWorldSubsystem::GetChunkCollisionState(const FVoxelChunkCoordinate& Coordinate) const
+{
+	if (const EVoxelCollisionState* State = CollisionStates.Find(Coordinate))
+	{
+		return *State;
+	}
+	return EVoxelCollisionState::NotRequired;
+}
+
+bool UVoxelWorldSubsystem::HasChunkCollision(const FVoxelChunkCoordinate& Coordinate) const
+{
+	if (const TWeakObjectPtr<UVoxelCollisionComponent>* CompPtr = ChunkCollisionComponents.Find(Coordinate))
+	{
+		return CompPtr->IsValid() && CompPtr->Get()->HasActiveCollision();
+	}
+	return false;
+}
+
 void UVoxelWorldSubsystem::ClearAllChunks()
 {
 	check(IsInGameThread());
@@ -660,6 +975,13 @@ void UVoxelWorldSubsystem::ClearAllChunks()
 	InFlightJobHandles.Empty();
 	PendingRemeshCoordinates.Empty();
 
+	for (auto& Pair : InFlightCollisionCancelFlags)
+	{
+		Pair.Value->Store(true);
+	}
+	InFlightCollisionCancelFlags.Empty();
+	InFlightCollisionJobHandles.Empty();
+
 	TArray<FVoxelChunkCoordinate> CoordsToUnload;
 	CoordsToUnload.Reserve(ChunkStates.Num());
 	for (const TPair<FVoxelChunkCoordinate, EVoxelChunkState>& Pair : ChunkStates)
@@ -670,6 +992,8 @@ void UVoxelWorldSubsystem::ClearAllChunks()
 	{
 		UnloadChunk(Coord, /*bTriggerNeighborRemesh=*/false);
 	}
+
+	// Drain mesh completions and release leases
 	FVoxelCompletedMeshItem DroppedItem;
 	while (CompletedMeshQueue.Dequeue(DroppedItem))
 	{
@@ -686,6 +1010,37 @@ void UVoxelWorldSubsystem::ClearAllChunks()
 		}
 	}
 	FinalizationQueueDepth = 0;
+
+	// Drain collision completions and release leases
+	FVoxelCompletedCollisionItem DroppedCollisionItem;
+	while (CompletedCollisionQueue.Dequeue(DroppedCollisionItem))
+	{
+		if (ChunkStore)
+		{
+			if (DroppedCollisionItem.SlotIndex != INDEX_NONE)
+			{
+				ChunkStore->ReleaseWorkerLease(DroppedCollisionItem.SlotIndex);
+			}
+			for (int32 NSlot : DroppedCollisionItem.NeighborSlotIndices)
+			{
+				ChunkStore->ReleaseWorkerLease(NSlot);
+			}
+		}
+	}
+	FinalizationCollisionQueueDepth = 0;
+
+	// Destroy any remaining collision components
+	for (auto& Pair : ChunkCollisionComponents)
+	{
+		if (Pair.Value.IsValid())
+		{
+			Pair.Value->ClearCollisionData();
+			Pair.Value->DestroyComponent();
+		}
+	}
+	ChunkCollisionComponents.Empty();
+	CollisionStates.Empty();
+	ChunkCollisionRevisions.Empty();
 }
 
 const FVoxelChunk* UVoxelWorldSubsystem::FindChunk(const FVoxelChunkCoordinate& Coordinate) const
