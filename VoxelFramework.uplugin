@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 2,
-	"VersionName": "2.2.0",
+	"Version": 3,
+	"VersionName": "2.3.0",
 	"FriendlyName": "Voxel Framework",
 	"Description": "Modular, data-driven voxel world framework. See Docs/ADR.md for architecture decisions.",
 	"Category": "Voxel",
@@ -23,6 +23,7 @@
 		{ "Name": "VoxelGeneration", "Type": "Runtime", "LoadingPhase": "Default" },
 		{ "Name": "VoxelMeshing", "Type": "Runtime", "LoadingPhase": "Default" },
 		{ "Name": "VoxelRendering", "Type": "Runtime", "LoadingPhase": "Default" },
+		{ "Name": "VoxelPhysics", "Type": "Runtime", "LoadingPhase": "Default" },
 		{ "Name": "VoxelWorld", "Type": "Runtime", "LoadingPhase": "Default" },
 		{ "Name": "VoxelStreaming", "Type": "Runtime", "LoadingPhase": "Default" },
 		{ "Name": "VoxelDebug", "Type": "Runtime", "LoadingPhase": "Default" }
