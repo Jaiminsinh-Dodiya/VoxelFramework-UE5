@@ -52,11 +52,15 @@
 #include "VoxelJobTypes.h"
 #include "Tickable.h"
 #include "VoxelMeshData.h"
+#include "VoxelCollisionData.h"
+#include "VoxelPhysicsTypes.h"
 #include "VoxelWorldSubsystem.generated.h"
+
 class FVoxelChunk;
 class UVoxelBlockRegistry;
 class UVoxelBiomeDefinition;
 class UVoxelMeshComponent;
+class UVoxelCollisionComponent;
 class UMaterialInterface;
 class AVoxelWorldRenderActor;
 
@@ -83,6 +87,33 @@ struct FVoxelCompletedMeshItem
 		, MeshData(MoveTemp(InMeshData))
 		, QueueEntryTime(InQueueEntryTime)
 		, bIsRemesh(bInIsRemesh)
+	{
+	}
+};
+
+struct FVoxelCompletedCollisionItem
+{
+	FVoxelChunkCoordinate Coordinate;
+	int32 SlotIndex = INDEX_NONE;
+	TArray<int32> NeighborSlotIndices;
+	FVoxelCollisionData CollisionData;
+	double QueueEntryTime = 0.0;
+	uint32 CollisionRevision = 0;
+
+	FVoxelCompletedCollisionItem() = default;
+	FVoxelCompletedCollisionItem(
+		const FVoxelChunkCoordinate& InCoordinate,
+		int32 InSlotIndex,
+		TArray<int32>&& InNeighborSlots,
+		FVoxelCollisionData&& InCollisionData,
+		double InQueueEntryTime,
+		uint32 InRevision)
+		: Coordinate(InCoordinate)
+		, SlotIndex(InSlotIndex)
+		, NeighborSlotIndices(MoveTemp(InNeighborSlots))
+		, CollisionData(MoveTemp(InCollisionData))
+		, QueueEntryTime(InQueueEntryTime)
+		, CollisionRevision(InRevision)
 	{
 	}
 };
@@ -123,6 +154,19 @@ public:
 	/** Requests an asynchronous remesh for an already resident ready chunk (e.g. when neighboring chunk arrives or unloads). */
 	void RequestRemeshChunk(const FVoxelChunkCoordinate& Coordinate, EVoxelWorkPriority WorkPriority = EVoxelWorkPriority::Normal);
 
+	// VoxelPhysics Collision Management APIs
+	/** Requests physical collision generation and Chaos cooking for an existing resident chunk. */
+	void RequestChunkCollision(const FVoxelChunkCoordinate& Coordinate, EVoxelWorkPriority WorkPriority = EVoxelWorkPriority::High);
+
+	/** Unloads and destroys collision representation for a chunk. */
+	void UnloadChunkCollision(const FVoxelChunkCoordinate& Coordinate);
+
+	/** Returns current collision lifecycle state for a chunk coordinate. */
+	EVoxelCollisionState GetChunkCollisionState(const FVoxelChunkCoordinate& Coordinate) const;
+
+	/** Returns true if chunk currently has registered active physical collision. */
+	bool HasChunkCollision(const FVoxelChunkCoordinate& Coordinate) const;
+
 	/** Toggle rendering visibility for a chunk's mesh component. No-op if chunk has no component (in-flight or all-air). */
 	void SetChunkVisible(const FVoxelChunkCoordinate& Coordinate, bool bVisible);
 
@@ -147,6 +191,7 @@ public:
 
 	// Component Pool Metrics
 	int32 GetActiveComponentCount() const { return ChunkMeshComponents.Num(); }
+	int32 GetActiveCollisionComponentCount() const { return ChunkCollisionComponents.Num(); }
 	int32 GetPooledComponentCount() const { return ComponentPool.Num(); }
 	int32 GetCreatedComponentCount() const { return CreatedComponentCount; }
 	int32 GetReusedComponentCount() const { return ReusedComponentCount; }
@@ -212,20 +257,36 @@ private:
 	double TotalQueueLatencyAccumMs = 0.0;
 	int64 TotalFinalizedItemsSampled = 0;
 
+	void ProcessCompletedCollisionQueue(float DeltaTime);
+	void FinalizeChunkCollision(FVoxelCompletedCollisionItem&& Item);
+	void HandleCollisionCookFinished(UVoxelCollisionComponent* Comp, bool bSuccess, uint32 Revision, FVoxelChunkCoordinate Coordinate);
+	UVoxelCollisionComponent* GetOrCreateCollisionComponent(const FVoxelChunkCoordinate& Coordinate);
+
 	// Not a UPROPERTY: FVoxelChunkCoordinate is a plain struct (not USTRUCT),
 	// so UHT cannot parse it as a TMap key. GC safety is fine because each
 	// component's Outer is RenderHostActor, which keeps it rooted.
 	TMap<FVoxelChunkCoordinate, TWeakObjectPtr<UVoxelMeshComponent>> ChunkMeshComponents;
+	TMap<FVoxelChunkCoordinate, TWeakObjectPtr<UVoxelCollisionComponent>> ChunkCollisionComponents;
 
 	TMap<FVoxelChunkCoordinate, EVoxelChunkState> ChunkStates;
+	TMap<FVoxelChunkCoordinate, EVoxelCollisionState> CollisionStates;
+	TMap<FVoxelChunkCoordinate, uint32> ChunkCollisionRevisions;
+
 	TSet<FVoxelChunkCoordinate> RequestedCoordinates; // both in-flight and completed - prevents double-dispatch
 	TSet<FVoxelChunkCoordinate> ReadyCoordinates;     // generation completed (mesh may still be empty for all-air chunks)
 	TSet<FVoxelChunkCoordinate> PendingRemeshCoordinates; // deduplicates in-flight remesh requests
+
 	TMap<FVoxelChunkCoordinate, FVoxelJobHandle> InFlightJobHandles; // coord -> scheduler job
 	TMap<FVoxelChunkCoordinate, TSharedRef<TAtomic<bool>, ESPMode::ThreadSafe>> InFlightCancelFlags;
 
+	TMap<FVoxelChunkCoordinate, FVoxelJobHandle> InFlightCollisionJobHandles;
+	TMap<FVoxelChunkCoordinate, TSharedRef<TAtomic<bool>, ESPMode::ThreadSafe>> InFlightCollisionCancelFlags;
+
 	TQueue<FVoxelCompletedMeshItem, EQueueMode::Mpsc> CompletedMeshQueue;
 	TAtomic<int32> FinalizationQueueDepth{ 0 };
+
+	TQueue<FVoxelCompletedCollisionItem, EQueueMode::Mpsc> CompletedCollisionQueue;
+	TAtomic<int32> FinalizationCollisionQueueDepth{ 0 };
 
 	int32 ChunkSize = 32;
 	int32 WorldSeed = 1234;
