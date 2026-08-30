@@ -277,6 +277,24 @@ void UVoxelStreamingManager::Tick(float DeltaTime)
 				}
 				WorldSubsystem->SetChunkVisible(Coord, bShouldBeVisible);
 			}
+
+			// Collision simulation band management
+			const bool bShouldHaveCollision = (Band <= EVoxelStreamingBand::Simulation);
+			if (bShouldHaveCollision)
+			{
+				if (WorldSubsystem->IsChunkReady(Coord))
+				{
+					const EVoxelCollisionState ColState = WorldSubsystem->GetChunkCollisionState(Coord);
+					if (ColState == EVoxelCollisionState::NotRequired)
+					{
+						WorldSubsystem->RequestChunkCollision(Coord, EVoxelWorkPriority::High);
+					}
+				}
+			}
+			else if (WorldSubsystem->HasChunkCollision(Coord))
+			{
+				WorldSubsystem->UnloadChunkCollision(Coord);
+			}
 		}
 
 		UE_LOG(LogVoxelStreaming, Verbose, TEXT("Viewer (%d,%d,%d): %d new requests, %d unloads queued"),
