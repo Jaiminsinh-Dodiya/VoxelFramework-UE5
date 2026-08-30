@@ -101,6 +101,39 @@ so there's no reason to also pay disk cost for regenerable data.
 per-chunk state that can't be expressed as a diff (would need a concrete
 example before considering this).
 
+## ADR-006: Dedicated UVoxelCollisionComponent & Plain CPU Collision Snapshot
+
+**Decision:** Visual geometry (`UVoxelMeshComponent` / `VoxelRendering`) and physical
+collision geometry (`UVoxelCollisionComponent` / `VoxelPhysics`) are strictly separated.
+Worker threads build an immutable `FVoxelCollisionData` snapshot (vertices, indices, bounds)
+which is handed to `UVoxelCollisionComponent` to cook with Chaos physics via
+`IInterface_CollisionDataProvider` and `UBodySetup::CreatePhysicsMeshesAsync`.
+
+Key design rules:
+1. **Plain CPU Snapshot:** `FVoxelCollisionData` contains zero UObject pointers, zero Chaos
+   objects, and zero raw chunk pointers. It is completely safe across worker threads.
+2. **`bDeformableMesh = false`:** Static voxel terrain sets `bDeformableMesh = false` to enable
+   Chaos static BVH optimization and vertex cleaning, avoiding overhead intended only for
+   dynamically skinned skeletal meshes.
+3. **Collision Revision Tracking:** Every collision request increments a monotonic `CollisionRevision`.
+   Stale async cook completions (e.g. from unloaded or superseded chunks) are safely discarded.
+4. **Abort Semantics:** When a chunk is unloaded or reset, `AbortPhysicsMeshAsyncCreation()`
+   cancels in-flight Chaos cooks immediately, and pending cook pointers are cleared.
+5. **Authoritative State Transitions:** Collision moves deterministically through:
+   `NotRequired` → `Queued` → `Building` → `Cooking` → `Ready` (or `Failed`) → `Unloading`.
+6. **Lease Preservation:** Neighbor chunks required for boundary culling are protected by
+   worker read leases until the collision build job completes or cancels.
+
+**Why:** Lifecycles, relevance distances, and execution stages are fundamentally different.
+At `RenderDistance=14`, thousands of chunks are visible on screen, but characters only
+require physical terrain collision in the immediate vicinity (`SimulationDistance=4`).
+Creating and cooking Chaos `UBodySetup` for thousands of distant visual chunks would destroy
+mobile frame pacing and memory budgets. Furthermore, dedicated headless servers can run
+`VoxelPhysics` without loading `VoxelRendering` or GPU scene proxies at all.
+
+**Revisit only if:** Unreal Engine deprecates `IInterface_CollisionDataProvider` or introduces
+a unified hardware ray-tracing / collision proxy that renders and collides natively on GPU.
+
 ---
 
 ## Performance budgets (design constraints, not aspirations)
@@ -110,25 +143,9 @@ example before considering this).
 | Streaming (Game Thread decision-making) | ≤ 1.5 ms/frame |
 | Generation | ≤ 2 ms/frame equivalent, budgeted across worker tasks |
 | Meshing | Worker threads only, 0 ms Game Thread |
+| Collision Generation | Worker threads only, 0 ms Game Thread |
+| Physics Submission & Cooking | Async Chaos cooking; GT registration ≤ 0.5 ms/frame |
 | Rendering submission | ≤ 1 ms/frame Game Thread |
 | Serialization | Must never block Game Thread |
 
 Any new feature gets checked against this table before it's added, not after.
-
-## Scheduler cancellation stance
-
-Job/task state is modeled from day one as:
-
-```cpp
-enum class EVoxelJobState : uint8
-{
-    Queued,
-    Running,
-    Completed,
-    Cancelled
-};
-```
-
-`Cancelled` is not driven by any logic yet in Phase 1–4. The state exists
-so Phase 5 streaming can add real cancellation without touching the job
-data model.
