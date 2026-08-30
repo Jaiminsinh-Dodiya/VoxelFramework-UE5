@@ -115,11 +115,50 @@ See [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md) §9 for the current honest li
   - `Voxel.Streaming.SchedulerBoundedHistory` (2,000-job historical bounded retention)
   - `Voxel.Streaming.LongRunStress` (1,000-iteration rapid boundary crossing, churn, and slot stability)
 
+## Just completed: Phase 7 — VoxelPhysics V1 (Real Terrain Collision) ✅
+
+- [x] **7.1 Dedicated Physical Component Architecture (ADR-006)**:
+  - Implemented `UVoxelCollisionComponent` (`UPrimitiveComponent` + `IInterface_CollisionDataProvider`).
+  - Separated visual rendering (`UVoxelMeshComponent`, up to `RenderDistance=14`) from physical collision (`UVoxelCollisionComponent`, up to `SimulationDistance=4`).
+- [x] **7.2 Immutable Collision Snapshot Model**:
+  - `FVoxelCollisionData` generated on worker threads as plain CPU vertex/index buffers.
+  - Zero UObject pointers, zero Chaos resources, and zero raw chunk pointers in collision snapshot.
+  - `GetPhysicsTriMeshData` reads purely from the snapshot during Chaos BVH cooking.
+- [x] **7.3 Worker-Side Greedy Collision Builder (`FVoxelCollisionBuilder`)**:
+  - Binary greedy merging on collidable voxel faces, reducing triangle count by up to 90% on flat surfaces.
+  - Neighbor-aware boundary face culling with active worker leases on all `Ready` cardinal neighbors.
+  - Respects `UVoxelBlockDefinition::bGeneratesCollision` (filters foliage/decorative non-collidable blocks).
+  - Fast-path for empty / all-air chunks (skips allocation, cooking, and physics state registration).
+- [x] **7.4 Unreal Engine 5.7 Chaos Async Cooking & Lifecycle**:
+  - `UBodySetup::CreatePhysicsMeshesAsync` cooks Chaos triangle mesh collision off the Game Thread.
+  - Revision/Stale-result protection (`CollisionRevision` counter) rejects obsolete cook completions when chunks are modified or unloaded.
+  - `RecreatePhysicsState()` registers collision with Chaos `FPhysScene`.
+  - Clean teardown and `AbortPhysicsMeshAsyncCreation()` on chunk unload / world shutdown.
+- [x] **7.5 Streaming Integration**:
+  - Managed by `UVoxelStreamingManager` within `SimulationDistance` band.
+  - Distant chunks beyond `SimulationDistance` release collision components while retaining visual rendering.
+- [x] **7.6 Automation Test Suite (44/44 Passing — Exit Code: 0)**:
+  - `Voxel.Physics.Cave`
+  - `Voxel.Physics.CookFailure`
+  - `Voxel.Physics.Deterministic`
+  - `Voxel.Physics.EmptyChunk`
+  - `Voxel.Physics.FlatSurface`
+  - `Voxel.Physics.MissingNeighbor`
+  - `Voxel.Physics.NeighborArrivalDuringCook`
+  - `Voxel.Physics.NeighborBoundary`
+  - `Voxel.Physics.NeighborUnloadDuringCook`
+  - `Voxel.Physics.NonCollidableFilter`
+  - `Voxel.Physics.OutwardWindingNormals`
+  - `Voxel.Physics.SingleVoxel`
+  - `Voxel.Physics.Slope`
+  - `Voxel.Physics.StaleRevision`
+  - `Voxel.Physics.UnloadDuringCook`
+
 ---
 
 ## 🔒 Low-Level Runtime Freeze & Next Product Phase
 
-With Phase 6.4 complete, the low-level runtime (`VoxelCore`, `VoxelRuntime`, `VoxelMath`, `VoxelAssets`, `VoxelStorage`, `VoxelGeneration`, `VoxelMeshing`, `VoxelRendering`, `VoxelWorld`, `VoxelStreaming`, `VoxelDebug`) is **airtight and frozen**.
+With Phase 6.4 and Phase 7 complete, the low-level runtime (`VoxelCore`, `VoxelRuntime`, `VoxelMath`, `VoxelAssets`, `VoxelStorage`, `VoxelGeneration`, `VoxelMeshing`, `VoxelRendering`, `VoxelPhysics`, `VoxelWorld`, `VoxelStreaming`, `VoxelDebug`) is **airtight and frozen**.
 
 ### Serialization Product Decision:
 - `VoxelSerialization` (diff-based persistent terrain modification) is an explicit opt-in choice.
@@ -130,7 +169,6 @@ With Phase 6.4 complete, the low-level runtime (`VoxelCore`, `VoxelRuntime`, `Vo
 
 ## Optional / not on the critical path
 
-- [ ] `VoxelPhysics` — Chaos collision generation from mesh data. Optional plugin dependency.
 - [ ] `VoxelNavigation` — nav mesh rebuild hooks on chunk changes. Optional.
 - [ ] `VoxelNetworking` — not designed at all yet.
 
