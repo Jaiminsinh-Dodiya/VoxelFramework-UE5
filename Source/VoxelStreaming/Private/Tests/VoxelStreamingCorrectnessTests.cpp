@@ -90,11 +90,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FVoxelDistancePriorityTest::RunTest(const FString& Parameters)
 {
-	// Priority rule:
-	// dist <= Sim (4)  -> Critical
-	// dist <= Ren (8)  -> High
-	// dist <= Gen (10) -> Normal
-	// dist >  Gen (10) -> Low
 	const int32 Sim = 4;
 	const int32 Ren = 8;
 	const int32 Gen = 10;
@@ -114,6 +109,210 @@ bool FVoxelDistancePriorityTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Dist 9 is Normal"), MapPriority(9), EVoxelWorkPriority::Normal);
 	TestEqual(TEXT("Dist 10 is Normal (boundary)"), MapPriority(10), EVoxelWorkPriority::Normal);
 	TestEqual(TEXT("Dist 11 is Low (distant background)"), MapPriority(11), EVoxelWorkPriority::Low);
+
+	return true;
+}
+
+// ============================================================================
+// Test 4: Scheduler Terminal Completion & Cancellation Guarantee (Phase 6.4.1)
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FVoxelSchedulerTerminalCompletionTest,
+	"Voxel.Streaming.SchedulerTerminalCompletion",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelSchedulerTerminalCompletionTest::RunTest(const FString& Parameters)
+{
+	FVoxelScheduler Scheduler;
+
+	// Case 1: Cancel while Queued -> Work is skipped, but OnComplete MUST run exactly once
+	{
+		FEvent* BlockEvent = FPlatformProcess::GetSynchEventFromPool();
+		bool bWorkRan = false;
+		bool bOnCompleteRan = false;
+
+		const FVoxelJobHandle Handle = Scheduler.Submit(
+			[BlockEvent, &bWorkRan]()
+			{
+				bWorkRan = true;
+				BlockEvent->Wait();
+			},
+			EVoxelWorkPriority::Low,
+			[&bOnCompleteRan]()
+			{
+				bOnCompleteRan = true;
+			});
+
+		// Cancel immediately while queued
+		Scheduler.RequestCancel(Handle);
+		FPlatformProcess::Sleep(0.05f);
+
+		TestEqual(TEXT("Case 1: State is Cancelled"), Scheduler.GetState(Handle), EVoxelJobState::Cancelled);
+		TestFalse(TEXT("Case 1: Work was skipped"), bWorkRan);
+		TestTrue(TEXT("Case 1: OnComplete executed despite queued cancellation"), bOnCompleteRan);
+
+		BlockEvent->Trigger();
+		FPlatformProcess::ReturnSynchEventToPool(BlockEvent);
+	}
+
+	// Case 2: Duplicate cancel -> Idempotent
+	{
+		const FVoxelJobHandle Handle = Scheduler.Submit([]() {}, EVoxelWorkPriority::Low);
+		Scheduler.RequestCancel(Handle);
+		Scheduler.RequestCancel(Handle); // Second cancel call
+		TestEqual(TEXT("Case 2: State remains Cancelled"), Scheduler.GetState(Handle), EVoxelJobState::Cancelled);
+	}
+
+	// Case 3: Cancel after completion -> State remains Completed
+	{
+		bool bOnCompleteRan = false;
+		const FVoxelJobHandle Handle = Scheduler.Submit(
+			[]() {},
+			EVoxelWorkPriority::Critical,
+			[&bOnCompleteRan]() { bOnCompleteRan = true; });
+
+		// Wait for completion
+		Scheduler.WaitForAllTasks(1.0);
+		TestEqual(TEXT("Case 3: State is Completed"), Scheduler.GetState(Handle), EVoxelJobState::Completed);
+
+		Scheduler.RequestCancel(Handle); // Cancel after finish
+		TestEqual(TEXT("Case 3: State remains Completed after cancel"), Scheduler.GetState(Handle), EVoxelJobState::Completed);
+		TestTrue(TEXT("Case 3: OnComplete executed"), bOnCompleteRan);
+	}
+
+	return true;
+}
+
+// ============================================================================
+// Test 5: Neighbor Lifetime & Worker Lease Retention during Unload (Phase 6.4.2)
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FVoxelNeighborLifetimeSafetyTest,
+	"Voxel.Streaming.NeighborLifetimeSafety",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelNeighborLifetimeSafetyTest::RunTest(const FString& Parameters)
+{
+	FVoxelChunkStore Store(32);
+	const FVoxelChunkCoordinate TargetCoord(0, 0, 0);
+	const FVoxelChunkCoordinate NeighborCoord(1, 0, 0);
+
+	// 1. Create Target and Neighbor chunks
+	Store.CreateOrGetChunk(TargetCoord);
+	Store.CreateOrGetChunk(NeighborCoord);
+
+	// 2. Mesher leases Target and Neighbor
+	const int32 TargetSlot = Store.AcquireWorkerLease(TargetCoord);
+	const int32 NeighborSlot = Store.AcquireWorkerLease(NeighborCoord);
+	TestTrue(TEXT("Target slot leased"), TargetSlot != INDEX_NONE);
+	TestTrue(TEXT("Neighbor slot leased"), NeighborSlot != INDEX_NONE);
+
+	// 3. Neighbor is unloaded while Target mesher worker is still active
+	Store.RemoveChunk(NeighborCoord);
+	TestNull(TEXT("Neighbor chunk lookups return nullptr"), Store.FindChunkByCoordinate(NeighborCoord));
+	TestTrue(TEXT("Neighbor slot memory is preserved because worker holds lease"), Store.IsSlotBusy(NeighborSlot));
+
+	// 4. A new chunk is created - must NOT steal Neighbor's memory slot!
+	const FVoxelChunkCoordinate NewCoord(9, 9, 9);
+	const FVoxelChunkHandle NewHandle = Store.CreateOrGetChunk(NewCoord);
+	const int32 NewSlot = Store.AcquireWorkerLease(NewCoord);
+	TestTrue(TEXT("New chunk allocated a distinct slot"), NewSlot != NeighborSlot);
+	Store.ReleaseWorkerLease(NewSlot);
+
+	// 5. Mesher finishes and releases both leases
+	Store.ReleaseWorkerLease(TargetSlot);
+	Store.ReleaseWorkerLease(NeighborSlot);
+	TestFalse(TEXT("Neighbor slot is no longer busy"), Store.IsSlotBusy(NeighborSlot));
+
+	// 6. Next chunk creation can now safely recycle NeighborSlot
+	const FVoxelChunkCoordinate RecycledCoord(10, 10, 10);
+	Store.CreateOrGetChunk(RecycledCoord);
+	const int32 RecycledSlot = Store.AcquireWorkerLease(RecycledCoord);
+	TestEqual(TEXT("Slot safely recycled once all leases released"), RecycledSlot, NeighborSlot);
+	Store.ReleaseWorkerLease(RecycledSlot);
+
+	return true;
+}
+
+// ============================================================================
+// Test 6: Bounded Scheduler Job History Retention (Phase 6.4.5)
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FVoxelSchedulerBoundedHistoryTest,
+	"Voxel.Streaming.SchedulerBoundedHistory",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelSchedulerBoundedHistoryTest::RunTest(const FString& Parameters)
+{
+	FVoxelScheduler Scheduler;
+	const int32 BoundedLimit = 512;
+	Scheduler.SetMaxRetainedJobStates(BoundedLimit);
+
+	// Submit 2,000 lightweight jobs
+	const int32 JobCount = 2000;
+	for (int32 i = 0; i < JobCount; ++i)
+	{
+		Scheduler.Submit([]() {}, EVoxelWorkPriority::Normal);
+	}
+
+	// Wait for all jobs to complete
+	const bool bAllDone = Scheduler.WaitForAllTasks(5.0);
+	TestTrue(TEXT("All 2,000 jobs completed"), bAllDone);
+
+	// Verify tracked job count is bounded to approximately BoundedLimit
+	const int32 TrackedCount = Scheduler.GetTrackedJobCount();
+	TestTrue(TEXT("JobStates map is bounded"), TrackedCount <= BoundedLimit + 10);
+
+	return true;
+}
+
+// ============================================================================
+// Test 7: Long-Run Streaming Stress & Slot Stability (Phase 6.4.7)
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FVoxelStreamingLongRunStressTest,
+	"Voxel.Streaming.LongRunStress",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelStreamingLongRunStressTest::RunTest(const FString& Parameters)
+{
+	FVoxelChunkStore Store(32);
+	FVoxelScheduler Scheduler;
+	Scheduler.SetMaxRetainedJobStates(256);
+
+	// Rapidly churn through 1,000 chunks with concurrent worker leasing and removals
+	constexpr int32 ChurnIterations = 1000;
+	for (int32 i = 0; i < ChurnIterations; ++i)
+	{
+		const FVoxelChunkCoordinate Coord(i % 16, (i / 16) % 16, i % 4);
+		Store.CreateOrGetChunk(Coord);
+		const int32 Slot = Store.AcquireWorkerLease(Coord);
+
+		Scheduler.Submit(
+			[]() { /* Simulating short background workload */ },
+			EVoxelWorkPriority::Normal,
+			[&Store, Slot]()
+			{
+				if (Slot != INDEX_NONE)
+				{
+					Store.ReleaseWorkerLease(Slot);
+				}
+			});
+
+		// Every 4 iterations, remove older coordinates
+		if ((i % 4) == 0 && i >= 16)
+		{
+			const FVoxelChunkCoordinate OldCoord((i - 16) % 16, ((i - 16) / 16) % 16, (i - 16) % 4);
+			Store.RemoveChunk(OldCoord);
+		}
+	}
+
+	// Wait for all asynchronous tasks to settle
+	const bool bSettled = Scheduler.WaitForAllTasks(5.0);
+	TestTrue(TEXT("Stress tasks settled within timeout"), bSettled);
+
+	// Verify total slots created remained bounded by active volume
+	TestTrue(TEXT("Store total slot count remained bounded"), Store.GetTotalSlotCount() <= 256);
 
 	return true;
 }
