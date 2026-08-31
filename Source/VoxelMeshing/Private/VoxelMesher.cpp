@@ -88,25 +88,66 @@ namespace
 	}
 }
 
-FVoxelMeshData FVoxelMesher::GenerateMesh(const FVoxelChunk& Chunk, const UVoxelBlockRegistry* BlockRegistry)
+FVoxelMeshData FVoxelMesher::GenerateMesh(
+	const FVoxelChunk& Chunk,
+	const UVoxelBlockRegistry* BlockRegistry,
+	const FVoxelNeighborChunks* Neighbors,
+	const FVoxelChunkCoordinate* Coordinate,
+	float VoxelWorldSize)
 {
 	FVoxelMeshData MeshData;
 
 	const int32 Size = Chunk.GetSize();
-	if (Size <= 0)
+	if (Size <= 0 || Chunk.IsEmpty())
 	{
 		return MeshData;
 	}
 
-	// Chunk-edge voxels face air beyond the boundary - see header comment
-	// on cross-chunk stitching being explicitly out of scope here.
+	const bool bApplyWorldTransform = (Coordinate != nullptr);
+	const FVector3f ChunkOrigin = bApplyWorldTransform
+		? FVector3f(
+			static_cast<float>(Coordinate->X * Size) * VoxelWorldSize,
+			static_cast<float>(Coordinate->Y * Size) * VoxelWorldSize,
+			static_cast<float>(Coordinate->Z * Size) * VoxelWorldSize)
+		: FVector3f::ZeroVector;
+	const float Scale = bApplyWorldTransform ? VoxelWorldSize : 1.0f;
+
 	auto GetBlock = [&](int32 X, int32 Y, int32 Z) -> FVoxelBlockId
 	{
-		if (X < 0 || Y < 0 || Z < 0 || X >= Size || Y >= Size || Z >= Size)
+		if (X >= 0 && Y >= 0 && Z >= 0 && X < Size && Y < Size && Z < Size)
 		{
-			return VoxelBlockId_Air;
+			return Chunk.GetBlock(X, Y, Z);
 		}
-		return Chunk.GetBlock(X, Y, Z);
+
+		if (Neighbors)
+		{
+			if (X < 0 && Neighbors->NegX)
+			{
+				return Neighbors->NegX->GetBlock(Size + X, Y, Z);
+			}
+			if (X >= Size && Neighbors->PosX)
+			{
+				return Neighbors->PosX->GetBlock(X - Size, Y, Z);
+			}
+			if (Y < 0 && Neighbors->NegY)
+			{
+				return Neighbors->NegY->GetBlock(X, Size + Y, Z);
+			}
+			if (Y >= Size && Neighbors->PosY)
+			{
+				return Neighbors->PosY->GetBlock(X, Y - Size, Z);
+			}
+			if (Z < 0 && Neighbors->NegZ)
+			{
+				return Neighbors->NegZ->GetBlock(X, Y, Size + Z);
+			}
+			if (Z >= Size && Neighbors->PosZ)
+			{
+				return Neighbors->PosZ->GetBlock(X, Y, Z - Size);
+			}
+		}
+
+		return VoxelBlockId_Air;
 	};
 
 	// Map from MaterialId -> index into MeshData.Sections, so repeated
@@ -146,10 +187,10 @@ FVoxelMeshData FVoxelMesher::GenerateMesh(const FVoxelChunk& Chunk, const UVoxel
 			{
 				for (X[U] = 0; X[U] < Size; ++X[U])
 				{
-					const FVoxelBlockId BlockA = (X[D] >= 0) ? GetBlock(X[0], X[1], X[2]) : VoxelBlockId_Air;
+					const FVoxelBlockId BlockA = (X[D] >= 0) ? GetBlock(X[0], X[1], X[2]) : GetBlock(X[0], X[1], X[2]);
 					const FVoxelBlockId BlockB = (X[D] < Size - 1)
 						? GetBlock(X[0] + Q[0], X[1] + Q[1], X[2] + Q[2])
-						: VoxelBlockId_Air;
+						: GetBlock(X[0] + Q[0], X[1] + Q[1], X[2] + Q[2]);
 
 					const bool bSolidA = BlockA != VoxelBlockId_Air;
 					const bool bSolidB = BlockB != VoxelBlockId_Air;
@@ -208,9 +249,6 @@ FVoxelMeshData FVoxelMesher::GenerateMesh(const FVoxelChunk& Chunk, const UVoxel
 					}
 
 					// --- Emit the quad ---
-					// Solid-side depth coordinate, used for AO neighbor lookups -
-					// the solid voxel is at X[D] if A was solid (bBackFace=false),
-					// or X[D]+1 if B was solid (bBackFace=true).
 					const int32 SolidDepth = Cell.bBackFace ? X[D] + 1 : X[D];
 
 					const int32 QuadMinU = I;
@@ -228,7 +266,7 @@ FVoxelMeshData FVoxelMesher::GenerateMesh(const FVoxelChunk& Chunk, const UVoxel
 					};
 
 					// Corner AO evaluated per actual lattice corner, independent of merge size.
-					auto ComputeCornerColor = [&](int32 CornerU, int32 CornerV) -> float
+					auto ComputeCornerAO = [&](int32 CornerU, int32 CornerV) -> uint8
 					{
 						const int32 OutsideU = (CornerU == QuadMinU) ? CornerU - 1 : CornerU;
 						const int32 OutsideV = (CornerV == QuadMinV) ? CornerV - 1 : CornerV;
@@ -240,37 +278,45 @@ FVoxelMeshData FVoxelMesher::GenerateMesh(const FVoxelChunk& Chunk, const UVoxel
 						const bool bCorner = SolidAt(OutsideU, OutsideV);
 
 						const int32 AO = CornerAO(bSide1, bSide2, bCorner);
-						return 0.25f + 0.75f * (static_cast<float>(AO) / 3.0f); // avoid fully-black corners
+						const float AOFloat = 0.25f + 0.75f * (static_cast<float>(AO) / 3.0f);
+						return static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(AOFloat * 255.0f), 0, 255));
 					};
 
-					FVector Base(0.0f);
+					FVector3f Base(0.0f);
 					Base[D] = static_cast<float>(X[D] + 1); // face plane sits at the boundary just generated
 					Base[U] = static_cast<float>(I);
 					Base[V] = static_cast<float>(J);
 
-					FVector DU(0.0f);
+					FVector3f DU(0.0f);
 					DU[U] = static_cast<float>(Width);
-					FVector DV(0.0f);
+					FVector3f DV(0.0f);
 					DV[V] = static_cast<float>(Height);
 
 					const int32 MaterialId = ResolveMaterialId(Cell.BlockId, BlockRegistry);
-					const FLinearColor Tint = ResolveVertexTint(Cell.BlockId, BlockRegistry);
 
-					FVector Normal(0.0f);
+					FVector3f Normal(0.0f);
 					Normal[D] = Cell.bBackFace ? -1.0f : 1.0f;
 
-					const float AO00 = ComputeCornerColor(QuadMinU, QuadMinV);
-					const float AO10 = ComputeCornerColor(QuadMaxU, QuadMinV);
-					const float AO11 = ComputeCornerColor(QuadMaxU, QuadMaxV);
-					const float AO01 = ComputeCornerColor(QuadMinU, QuadMaxV);
+					const uint8 AO00 = ComputeCornerAO(QuadMinU, QuadMinV);
+					const uint8 AO10 = ComputeCornerAO(QuadMaxU, QuadMinV);
+					const uint8 AO11 = ComputeCornerAO(QuadMaxU, QuadMaxV);
+					const uint8 AO01 = ComputeCornerAO(QuadMinU, QuadMaxV);
+
+					const FVector3f Pos00 = ChunkOrigin + Base * Scale;
+					const FVector3f Pos10 = ChunkOrigin + (Base + DU) * Scale;
+					const FVector3f Pos11 = ChunkOrigin + (Base + DU + DV) * Scale;
+					const FVector3f Pos01 = ChunkOrigin + (Base + DV) * Scale;
+
+					MeshData.Bounds += FVector(Pos00);
+					MeshData.Bounds += FVector(Pos11);
 
 					const int32 BaseVertexIndex = MeshData.Vertices.Num();
 
 					FVoxelMeshVertex V00, V10, V11, V01;
-					V00.Position = Base;                V00.Normal = Normal; V00.UV = FVector2D(0, 0);           V00.Color = Tint * AO00;
-					V10.Position = Base + DU;            V10.Normal = Normal; V10.UV = FVector2D(Width, 0);       V10.Color = Tint * AO10;
-					V11.Position = Base + DU + DV;       V11.Normal = Normal; V11.UV = FVector2D(Width, Height);  V11.Color = Tint * AO11;
-					V01.Position = Base + DV;            V01.Normal = Normal; V01.UV = FVector2D(0, Height);      V01.Color = Tint * AO01;
+					V00.Position = Pos00; V00.Normal = Normal; V00.UV = FVector2f(0, 0);          V00.Color = FColor(AO00, AO00, AO00, 255);
+					V10.Position = Pos10; V10.Normal = Normal; V10.UV = FVector2f(Width, 0);      V10.Color = FColor(AO10, AO10, AO10, 255);
+					V11.Position = Pos11; V11.Normal = Normal; V11.UV = FVector2f(Width, Height); V11.Color = FColor(AO11, AO11, AO11, 255);
+					V01.Position = Pos01; V01.Normal = Normal; V01.UV = FVector2f(0, Height);     V01.Color = FColor(AO01, AO01, AO01, 255);
 
 					MeshData.Vertices.Add(V00);
 					MeshData.Vertices.Add(V10);
@@ -280,27 +326,12 @@ FVoxelMeshData FVoxelMesher::GenerateMesh(const FVoxelChunk& Chunk, const UVoxel
 					FVoxelMeshSection& Section = GetOrAddSection(MaterialId);
 					if (!Cell.bBackFace)
 					{
-						// Front face (+D normal). NOTE: this order is deliberately the
-						// REVERSE of the mathematically "natural" CCW-from-+Normal
-						// winding (V00,V10,V11 / V00,V11,V01) - Unreal's rasterizer
-						// expects CLOCKWISE winding for front faces in screen space,
-						// not the right-handed-math CCW convention. This was the
-						// source of a real bug: the original ordering here rendered
-						// as fully backface-culled (invisible/black) through
-						// VoxelRendering's FVoxelMeshSceneProxy, which uses a
-						// standard one-sided default material - it only ever looked
-						// correct through VoxelDebug's UProceduralMeshComponent
-						// preview because PMC's fallback material for an unassigned
-						// slot happens to be two-sided, silently masking the wrong
-						// winding. Confirmed via a two-sided-material A/B test
-						// before this fix was made - see Docs/ARCHITECTURE.md.
 						Section.Indices.Append({
 							static_cast<uint32>(BaseVertexIndex + 0), static_cast<uint32>(BaseVertexIndex + 2), static_cast<uint32>(BaseVertexIndex + 1),
 							static_cast<uint32>(BaseVertexIndex + 0), static_cast<uint32>(BaseVertexIndex + 3), static_cast<uint32>(BaseVertexIndex + 2) });
 					}
 					else
 					{
-						// Back face (-D normal): reversed relative to the front-face case above.
 						Section.Indices.Append({
 							static_cast<uint32>(BaseVertexIndex + 0), static_cast<uint32>(BaseVertexIndex + 1), static_cast<uint32>(BaseVertexIndex + 2),
 							static_cast<uint32>(BaseVertexIndex + 0), static_cast<uint32>(BaseVertexIndex + 2), static_cast<uint32>(BaseVertexIndex + 3) });

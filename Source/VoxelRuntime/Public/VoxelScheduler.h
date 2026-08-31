@@ -31,41 +31,48 @@
 #include "CoreMinimal.h"
 #include "VoxelJobTypes.h"
 #include "Tasks/Task.h"
-
-/** Priority band for queued voxel work. Nearer-to-player work should use higher priority. */
-enum class EVoxelWorkPriority : uint8
-{
-	Low,
-	Normal,
-	High,
-	Critical
-};
+#include "HAL/PlatformTime.h"
 
 class VOXELRUNTIME_API FVoxelScheduler
 {
 public:
 	/**
-	 * Submits work to run via UE::Tasks. OnComplete (if bound) runs on
-	 * whichever thread the task completes on - see thread ownership note
-	 * above regarding Game Thread marshaling.
+	 * Submits work to run via UE::Tasks.
+	 *
+	 * Invariant: OnComplete (if bound) is GUARANTEED to execute exactly once when the job
+	 * reaches its terminal state, whether Work ran to completion, was cancelled before starting,
+	 * or was cancelled while running.
 	 */
 	FVoxelJobHandle Submit(TFunction<void()> Work, EVoxelWorkPriority Priority, TFunction<void()> OnComplete = nullptr);
 
-	/** Current state of a submitted job. Returns Cancelled if the handle is unknown/stale. */
+	/** Current state of a submitted job. Returns Cancelled/Completed if the handle is unknown or pruned. */
 	EVoxelJobState GetState(FVoxelJobHandle Handle) const;
 
-	/**
-	 * Marks a job as requested-for-cancellation. Per ADR (Phase 1-4), no
-	 * caller invokes this yet and Submit()'d work does not check for it -
-	 * the state transition exists so Phase 5 streaming can start checking
-	 * it inside long-running work without changing this class's API.
-	 */
+	/** Marks a job as requested-for-cancellation. Idempotent and thread-safe. */
 	void RequestCancel(FVoxelJobHandle Handle);
+
+	/** Number of submitted tasks currently active (either Queued or Running). */
+	int32 GetActiveTaskCount() const { return ActiveTaskCount.Load(); }
+
+	/**
+	 * Blocks until all active worker tasks have finished execution.
+	 * TimeoutSeconds is a diagnostic timeout. If it expires while tasks are still active,
+	 * returns false without permitting unsafe teardown.
+	 */
+	bool WaitForAllTasks(double TimeoutSeconds = 5.0);
+
+	/** Configures the bounded retention limit for historical completed/cancelled job states. */
+	void SetMaxRetainedJobStates(int32 MaxStates) { MaxRetainedCompletedJobStates = FMath::Max(256, MaxStates); }
+	int32 GetMaxRetainedJobStates() const { return MaxRetainedCompletedJobStates; }
+	int32 GetTrackedJobCount() const;
 
 private:
 	static UE::Tasks::ETaskPriority ToTaskPriority(EVoxelWorkPriority Priority);
+	void PruneJobStatesUnderLock();
 
 	mutable FCriticalSection StateLock;
 	TMap<uint64, EVoxelJobState> JobStates;
 	uint64 NextJobId = 1;
+	int32 MaxRetainedCompletedJobStates = 8192;
+	TAtomic<int32> ActiveTaskCount{ 0 };
 };

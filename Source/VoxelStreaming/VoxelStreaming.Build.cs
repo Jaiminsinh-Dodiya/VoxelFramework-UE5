@@ -13,6 +13,7 @@ public class VoxelStreaming : ModuleRules
 			"Engine",
 			"VoxelCore",
 			"VoxelRuntime",
+			"VoxelStorage",
 			"VoxelWorld",
 		});
 	}

@@ -54,12 +54,47 @@ void FVoxelChunkStore::RemoveChunk(const FVoxelChunkCoordinate& Coordinate)
 	}
 
 	const int32 SlotIndex = *SlotIndexPtr;
-	Slots[SlotIndex].bInUse = false;
-	// Note: Generation is deliberately NOT reset here - it only advances the
-	// next time this slot is reused, which is what makes old handles stale.
-
+	FSlot& Slot = Slots[SlotIndex];
+	Slot.bInUse = false;
 	CoordinateToSlot.Remove(Coordinate);
-	FreeSlotIndices.Add(SlotIndex);
+
+	// Invariant: only recycle to FreeSlotIndices if no active workers hold a lease on this slot.
+	// If workers are active, ReleaseWorkerLease will recycle the slot once the last worker finishes.
+	if (Slot.InFlightWorkers == 0)
+	{
+		FreeSlotIndices.Add(SlotIndex);
+	}
+}
+
+int32 FVoxelChunkStore::AcquireWorkerLease(const FVoxelChunkCoordinate& Coordinate)
+{
+	if (const int32* SlotIndexPtr = CoordinateToSlot.Find(Coordinate))
+	{
+		Slots[*SlotIndexPtr].InFlightWorkers++;
+		return *SlotIndexPtr;
+	}
+	return INDEX_NONE;
+}
+
+void FVoxelChunkStore::ReleaseWorkerLease(int32 SlotIndex)
+{
+	if (SlotIndex >= 0 && SlotIndex < Slots.Num())
+	{
+		FSlot& Slot = Slots[SlotIndex];
+		Slot.InFlightWorkers--;
+		check(Slot.InFlightWorkers >= 0);
+
+		// If the chunk was unloaded while the worker was active, recycle the slot now that all workers are done.
+		if (!Slot.bInUse && Slot.InFlightWorkers == 0)
+		{
+			FreeSlotIndices.Add(SlotIndex);
+		}
+	}
+}
+
+bool FVoxelChunkStore::IsSlotBusy(int32 SlotIndex) const
+{
+	return (SlotIndex >= 0 && SlotIndex < Slots.Num()) ? (Slots[SlotIndex].InFlightWorkers > 0) : false;
 }
 
 FVoxelChunk* FVoxelChunkStore::FindChunkByCoordinate(const FVoxelChunkCoordinate& Coordinate) const

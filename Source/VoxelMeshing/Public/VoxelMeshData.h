@@ -18,20 +18,18 @@
 
 #include "CoreMinimal.h"
 
-/** One mesh vertex. Deliberately NOT deduplicated across quads in the current implementation - see VoxelMesher.cpp comments for why, and Docs/TODO.md for the future shared-vertex-welding note. */
+/** One mesh vertex. Deliberately NOT deduplicated across quads in the current implementation. */
 struct FVoxelMeshVertex
 {
-	FVector Position = FVector::ZeroVector;
-	FVector Normal = FVector::UpVector;
-	FVector2D UV = FVector2D::ZeroVector;
+	FVector3f Position = FVector3f::ZeroVector;
+	FVector3f Normal = FVector3f::UpVector;
+	FVector2f UV = FVector2f::ZeroVector;
 
 	/**
-	 * Baked lighting data, RGB = ambient occlusion intensity (0=fully
-	 * occluded corner, 1=fully open), A unused. Per-vertex, computed
-	 * independently of how large the merged quad is - see VoxelMesher.cpp
-	 * "corner AO" comments for the algorithm.
+	 * Baked lighting data: RGB = ambient occlusion intensity (0=fully occluded corner, 255=fully open),
+	 * A = 255 (unused).
 	 */
-	FLinearColor Color = FLinearColor::White;
+	FColor Color = FColor::White;
 };
 
 /** One material's worth of triangles, indexing into FVoxelMeshData::Vertices. */
@@ -48,6 +46,7 @@ struct FVoxelMeshData
 {
 	TArray<FVoxelMeshVertex> Vertices;
 	TArray<FVoxelMeshSection> Sections;
+	FBox Bounds = FBox(ForceInit);
 
 	bool IsEmpty() const { return Vertices.Num() == 0; }
 

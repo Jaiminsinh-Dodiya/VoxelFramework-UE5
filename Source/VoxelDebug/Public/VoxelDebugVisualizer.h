@@ -56,6 +56,16 @@ class UVoxelBiomeDefinition;
 class UVoxelBlockRegistry;
 class FVoxelChunk;
 
+UENUM(BlueprintType)
+enum class EVoxelDiagnosticMode : uint8
+{
+	ModeB_VoxelRenderingOn UMETA(DisplayName = "Mode B: Voxel Rendering ON"),
+	ModeA_Baseline         UMETA(DisplayName = "Mode A: Baseline (Framework OFF)"),
+	ModeC_CpuOnly          UMETA(DisplayName = "Mode C: CPU-Only (No Render Components)"),
+	ModeD_StaticWorld      UMETA(DisplayName = "Mode D: Static World (Streaming Frozen)"),
+	ModeE_StreamingStress  UMETA(DisplayName = "Mode E: Streaming Stress")
+};
+
 UCLASS()
 class VOXELDEBUG_API AVoxelDebugVisualizer : public AActor
 {
@@ -64,38 +74,31 @@ class VOXELDEBUG_API AVoxelDebugVisualizer : public AActor
 public:
 	AVoxelDebugVisualizer();
 
-	/** Seed passed to the generation pipeline. Change and re-run to compare worlds. */
+	/** World seed passed into the generation pipeline for all preview modes. */
 	UPROPERTY(EditAnywhere, Category = "Voxel Debug")
 	int32 WorldSeed = 1234;
 
-	/** Voxels per chunk edge. Kept independent of UVoxelRuntimeSettings so this tool works without a full world subsystem setup. */
+	/** Chunk dimensions (XYZ). Must match UVoxelRuntimeSettings in real gameplay; exposed here so you can test smaller/larger chunks in isolation. */
 	UPROPERTY(EditAnywhere, Category = "Voxel Debug", meta = (ClampMin = "4", ClampMax = "64"))
 	int32 ChunkSize = 32;
 
-	/** How many chunks to generate along X and Y, centered on the origin chunk. 1 = just chunk (0,0,*). */
-	UPROPERTY(EditAnywhere, Category = "Voxel Debug", meta = (ClampMin = "1", ClampMax = "6"))
-	int32 ChunkRadiusXY = 2;
+	/** Number of chunks to generate in +/- X and +/- Y around the visualizer actor. Radius 1 = 3x3 = 9 chunks; Radius 2 = 5x5 = 25 chunks. */
+	UPROPERTY(EditAnywhere, Category = "Voxel Debug", meta = (ClampMin = "0", ClampMax = "8"))
+	int32 ChunkRadiusXY = 1;
 
-	/** How many chunks to generate along Z, starting from chunk Z=0 upward. Increase if terrain height pushes outside a single chunk. */
-	UPROPERTY(EditAnywhere, Category = "Voxel Debug", meta = (ClampMin = "1", ClampMax = "8"))
-	int32 ChunkCountZ = 3;
+	/** Number of chunks to stack along Z (from chunk Z=0 up to Z=ChunkCountZ-1). Matches WorldHeightInChunks. */
+	UPROPERTY(EditAnywhere, Category = "Voxel Debug", meta = (ClampMin = "1", ClampMax = "16"))
+	int32 ChunkCountZ = 2;
 
-	/** World-space size of one voxel cube/unit, in Unreal units. Default 100 matches the engine's basic cube mesh's native size and gives FVoxelMesher's 1-unit-per-voxel output a sensible scale. */
-	UPROPERTY(EditAnywhere, Category = "Voxel Debug", meta = (ClampMin = "1"))
+	/** World-space size of one voxel in Unreal units (cm). 100 = 1 meter per voxel (standard Minecraft scale). */
+	UPROPERTY(EditAnywhere, Category = "Voxel Debug")
 	float VoxelWorldSize = 100.0f;
 
-	/**
-	 * Per-block/material-ID material override, used by BOTH preview modes.
-	 * Cube mode keys this by raw FVoxelBlockId. Mesh mode keys it by the
-	 * MaterialId FVoxelMesher resolved (which, with no block registry
-	 * configured below, IS the raw FVoxelBlockId - see FVoxelMesher::
-	 * ResolveMaterialId) - so in the common no-registry case, the same map
-	 * works identically for both modes.
-	 */
+	/** Per-block material overrides (MaterialLayerIndex -> Material). */
 	UPROPERTY(EditAnywhere, Category = "Voxel Debug")
-	TMap<int32, TObjectPtr<UMaterialInterface>> BlockMaterials;
+	TMap<int32, TSoftObjectPtr<UMaterialInterface>> BlockMaterials;
 
-	/** Used for any block/material ID not present in BlockMaterials. Unset = engine default material. */
+	/** Fallback material used for any block without an explicit material assigned. */
 	UPROPERTY(EditAnywhere, Category = "Voxel Debug")
 	TObjectPtr<UMaterialInterface> DefaultMaterial;
 
@@ -106,6 +109,14 @@ public:
 	/** If true, mesh-mode components get simple collision enabled so you can walk/fly through the preview in PIE. Off by default to keep the debug tool cheap. */
 	UPROPERTY(EditAnywhere, Category = "Voxel Debug")
 	bool bEnableCollisionInMeshPreview = false;
+
+	/** Current diagnostic mode for isolating performance bottlenecks. */
+	UPROPERTY(EditAnywhere, Category = "Voxel Debug|Performance")
+	EVoxelDiagnosticMode ActiveDiagnosticMode = EVoxelDiagnosticMode::ModeB_VoxelRenderingOn;
+
+	/** Toggle dynamic shadow casting on voxel mesh components (useful to isolate Virtual Shadow Map non-nanite marking cost). */
+	UPROPERTY(EditAnywhere, Category = "Voxel Debug|Performance")
+	bool bVoxelCastShadows = true;
 
 	/** Cube-per-visible-voxel preview. Validates generation (terrain shape, caves, biomes). Clears any existing visualization first. */
 	UFUNCTION(CallInEditor, Category = "Voxel Debug|Cube Preview")
@@ -119,28 +130,11 @@ public:
 	UFUNCTION(CallInEditor, Category = "Voxel Debug|Real Renderer Preview")
 	void GenerateAndVisualizeRendered();
 
-	/**
-	 * Exercises the REAL UVoxelWorldSubsystem async pipeline: calls
-	 * RequestChunk for the same grid the other modes use. The subsystem
-	 * dispatches generation+meshing to a worker thread and marshals the
-	 * result back to the Game Thread to create UVoxelMeshComponents under
-	 * its own RenderHostActor. Compare against GenerateAndVisualizeRendered
-	 * (same mesh data, synchronous) to verify the async round-trip is
-	 * correct.
-	 *
-	 * NOTE: must be run in PIE (Play-In-Editor) - subsystems don't exist
-	 * in the editor world. Results appear asynchronously a few frames
-	 * after clicking.
-	 */
+	/** Exercises the REAL UVoxelWorldSubsystem async pipeline. */
 	UFUNCTION(CallInEditor, Category = "Voxel Debug|World Subsystem Test")
 	void RequestChunksViaSubsystem();
 
-	/**
-	 * Click AFTER RequestChunksViaSubsystem chunks have appeared. For each
-	 * chunk coordinate, re-generates locally (synchronous, same seed) and
-	 * compares every voxel block-by-block against what the subsystem
-	 * produced. Logs PASS/FAIL per chunk + a summary to the Output Log.
-	 */
+	/** Validates subsystem generated results block-by-block. */
 	UFUNCTION(CallInEditor, Category = "Voxel Debug|World Subsystem Test")
 	void ValidateSubsystemResults();
 
@@ -148,12 +142,7 @@ public:
 	UFUNCTION(CallInEditor, Category = "Voxel Debug")
 	void ClearVisualization();
 
-	/**
-	 * Starts a 10 Hz on-screen live diagnostics overlay showing FPS,
-	 * previous-frame thread timings (Game Thread, Render Thread, GPU),
-	 * memory usage, and streaming stats color-coded against mobile targets.
-	 * Must be run in PIE (Play-In-Editor).
-	 */
+	/** Starts a 10 Hz on-screen live diagnostics overlay showing FPS, thread timings, frame pacing percentiles, and streaming telemetry. */
 	UFUNCTION(CallInEditor, Category = "Voxel Debug|Performance")
 	void StartPerformanceDiagnostics();
 
@@ -161,15 +150,61 @@ public:
 	UFUNCTION(CallInEditor, Category = "Voxel Debug|Performance")
 	void StopPerformanceDiagnostics();
 
+	/** Mode A: Disables voxel rendering and streaming to measure the engine's pure baseline cost. */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|Performance|Modes")
+	void ApplyModeA_Baseline();
+
+	/** Mode B: Standard voxel generation + meshing + rendering + streaming. */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|Performance|Modes")
+	void ApplyModeB_VoxelRenderingOn();
+
+	/** Mode C: CPU-only generation and meshing (no render components or GPU work), isolating CPU throughput. */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|Performance|Modes")
+	void ApplyModeC_CpuOnly();
+
+	/** Mode D: Static voxel world (streaming updates frozen), isolating steady-state rendering cost. */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|Performance|Modes")
+	void ApplyModeD_StaticWorld();
+
+	/** Mode E: Streaming stress (forces rapid chunk churn). */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|Performance|Modes")
+	void ApplyModeE_StreamingStress();
+
+	/** Toggles shadow casting across all active voxel mesh components. */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|Performance")
+	void ToggleVoxelShadows();
+
+	/** Resets accumulated frame pacing statistics (P95, P99, min/max, spike counters). */
+	UFUNCTION(CallInEditor, Category = "Voxel Debug|Performance")
+	void ResetDiagnosticStats();
+
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void BeginDestroy() override;
 
 private:
 	static constexpr uint64 DiagnosticsKeyBase = 0x564F58454C000000ull;
-	static constexpr int32 DiagnosticsLineCount = 7;
+	static constexpr int32 DiagnosticsLineCount = 12;
+	static constexpr int32 MaxFrameHistorySamples = 1000;
+
+	uint64 GetDiagnosticsKey(int32 LineIndex) const
+	{
+		const uint64 InstanceSalt = (static_cast<uint64>(GetTypeHash(GetUniqueID())) & 0xFFFFull) << 16;
+		return DiagnosticsKeyBase | InstanceSalt | static_cast<uint64>(LineIndex & 0xFFFF);
+	}
 
 	FTSTicker::FDelegateHandle DiagnosticsTickerHandle;
 	bool bDiagnosticsRunning = false;
+
+	TArray<float> FrameTimeHistory;
+	int32 FramesOver16Ms = 0;
+	int32 FramesOver33Ms = 0;
+	int32 FramesOver50Ms = 0;
+	float MinFrameTimeMs = FLT_MAX;
+	float MaxFrameTimeMs = 0.0f;
+	float TotalFrameTimeAccumMs = 0.0f;
+	int32 TotalFramesSampled = 0;
+
+	float CalculatePercentile(float Percentile) const;
 
 	bool DiagnosticsTick(float DeltaTime);
 	UPROPERTY(Transient)

@@ -1,8 +1,8 @@
 using UnrealBuildTool;
 
-public class VoxelWorld : ModuleRules
+public class VoxelPhysics : ModuleRules
 {
-	public VoxelWorld(ReadOnlyTargetRules Target) : base(Target)
+	public VoxelPhysics(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
@@ -11,15 +11,12 @@ public class VoxelWorld : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
+			"PhysicsCore",
 			"VoxelCore",
 			"VoxelRuntime",
 			"VoxelAssets",
 			"VoxelStorage",
-			"VoxelGeneration",
 			"VoxelMeshing",
-			"VoxelRendering",
-			"VoxelPhysics",
-			"DeveloperSettings", // UVoxelWorldSettings
 		});
 	}
 }

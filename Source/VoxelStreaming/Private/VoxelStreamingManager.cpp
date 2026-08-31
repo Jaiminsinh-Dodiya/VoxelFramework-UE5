@@ -39,17 +39,57 @@ void UVoxelStreamingManager::Initialize(FSubsystemCollectionBase& Collection)
 	const UVoxelWorldSettings* WorldSettings = GetDefault<UVoxelWorldSettings>();
 	VoxelWorldSize = WorldSettings->VoxelWorldSize;
 
+	ChunkWorldEdgeSize = ChunkSize * VoxelWorldSize;
+	InvChunkWorldEdgeSize = (ChunkWorldEdgeSize > 0.0f) ? (1.0f / ChunkWorldEdgeSize) : 0.0f;
+
+	RebuildCachedOffsets();
+
 	UE_LOG(LogVoxelStreaming, Log,
-		TEXT("Initialized: Sim=%d Render=%d Gen=%d Persist=%d Budget=%.1fms Height=%d"),
+		TEXT("Initialized: Sim=%d Render=%d Gen=%d Persist=%d Budget=%.1fms Height=%d CachedOffsets=%d"),
 		SimulationDistance, RenderDistance, GenerationDistance, PersistenceDistance,
-		StreamingBudgetMs, WorldHeightInChunks);
+		StreamingBudgetMs, WorldHeightInChunks, CachedRelativeOffsets.Num());
+}
+
+void UVoxelStreamingManager::RebuildCachedOffsets()
+{
+	CachedRelativeOffsets.Reset();
+	const int32 Side = 2 * GenerationDistance + 1;
+	const int32 MaxDZ = FMath::Min(WorldHeightInChunks - 1, GenerationDistance);
+	CachedRelativeOffsets.Reserve(Side * Side * (2 * MaxDZ + 1));
+
+	for (int32 DX = -GenerationDistance; DX <= GenerationDistance; ++DX)
+	{
+		for (int32 DY = -GenerationDistance; DY <= GenerationDistance; ++DY)
+		{
+			for (int32 DZ = -MaxDZ; DZ <= MaxDZ; ++DZ)
+			{
+				const int32 ChebyshevDist = FMath::Max(FMath::Abs(DX), FMath::Max(FMath::Abs(DY), FMath::Abs(DZ)));
+				if (ChebyshevDist <= GenerationDistance)
+				{
+					CachedRelativeOffsets.Add(FIntVector(DX, DY, DZ));
+				}
+			}
+		}
+	}
+
+	// Sort ascending by Chebyshev distance ONCE at cache build time
+	CachedRelativeOffsets.Sort([](const FIntVector& A, const FIntVector& B)
+	{
+		const int32 DistA = FMath::Max(FMath::Abs(A.X), FMath::Max(FMath::Abs(A.Y), FMath::Abs(A.Z)));
+		const int32 DistB = FMath::Max(FMath::Abs(B.X), FMath::Max(FMath::Abs(B.Y), FMath::Abs(B.Z)));
+		return DistA < DistB;
+	});
 }
 
 void UVoxelStreamingManager::Deinitialize()
 {
 	ManagedCoordinates.Reset();
+	VisibleCoordinates.Reset();
 	PendingRequests.Reset();
+	PendingRequestIndex = 0;
 	PendingUnloads.Reset();
+	PendingUnloadIndex = 0;
+	CachedRelativeOffsets.Reset();
 	WorldSubsystem = nullptr;
 
 	Super::Deinitialize();
@@ -94,105 +134,251 @@ FVector UVoxelStreamingManager::GetAutoViewerPosition() const
 
 FVoxelChunkCoordinate UVoxelStreamingManager::WorldToChunkCoordinate(const FVector& WorldPosition) const
 {
-	const float Scale = ChunkSize * VoxelWorldSize;
 	return FVoxelChunkCoordinate(
-		FMath::FloorToInt32(WorldPosition.X / Scale),
-		FMath::FloorToInt32(WorldPosition.Y / Scale),
-		FMath::Clamp(FMath::FloorToInt32(WorldPosition.Z / Scale), 0, WorldHeightInChunks - 1));
+		FMath::FloorToInt32(WorldPosition.X * InvChunkWorldEdgeSize),
+		FMath::FloorToInt32(WorldPosition.Y * InvChunkWorldEdgeSize),
+		FMath::Clamp(FMath::FloorToInt32(WorldPosition.Z * InvChunkWorldEdgeSize), 0, WorldHeightInChunks - 1));
+}
+
+void UVoxelStreamingManager::ClearAllManaged()
+{
+	ManagedCoordinates.Reset();
+	VisibleCoordinates.Reset();
+	PendingRequests.Reset();
+	PendingRequestIndex = 0;
+	PendingUnloads.Reset();
+	PendingUnloadIndex = 0;
+	LastViewerChunk = FVoxelChunkCoordinate(INT32_MAX, INT32_MAX, INT32_MAX);
+	bFirstTick = true;
+}
+
+void UVoxelStreamingManager::SetRenderDistance(int32 InRenderDistance)
+{
+	InRenderDistance = FMath::Max(1, InRenderDistance);
+	if (RenderDistance != InRenderDistance)
+	{
+		RenderDistance = InRenderDistance;
+		GenerationDistance = FMath::Max(GenerationDistance, RenderDistance);
+		PersistenceDistance = FMath::Max(PersistenceDistance, GenerationDistance);
+		RebuildCachedOffsets();
+		bForceQueueReevaluation = true;
+	}
+}
+
+void UVoxelStreamingManager::SetSimulationDistance(int32 InSimulationDistance)
+{
+	InSimulationDistance = FMath::Clamp(InSimulationDistance, 0, RenderDistance);
+	if (SimulationDistance != InSimulationDistance)
+	{
+		SimulationDistance = InSimulationDistance;
+		bForceQueueReevaluation = true;
+	}
+}
+
+void UVoxelStreamingManager::SetGenerationDistance(int32 InGenerationDistance)
+{
+	InGenerationDistance = FMath::Max(RenderDistance, InGenerationDistance);
+	if (GenerationDistance != InGenerationDistance)
+	{
+		GenerationDistance = InGenerationDistance;
+		PersistenceDistance = FMath::Max(PersistenceDistance, GenerationDistance);
+		RebuildCachedOffsets();
+		bForceQueueReevaluation = true;
+	}
+}
+
+void UVoxelStreamingManager::SetPersistenceDistance(int32 InPersistenceDistance)
+{
+	InPersistenceDistance = FMath::Max(GenerationDistance, InPersistenceDistance);
+	if (PersistenceDistance != InPersistenceDistance)
+	{
+		PersistenceDistance = InPersistenceDistance;
+		bForceQueueReevaluation = true;
+	}
+}
+
+void UVoxelStreamingManager::SetStreamingBudgetMs(float InBudgetMs)
+{
+	StreamingBudgetMs = FMath::Max(0.1f, InBudgetMs);
+}
+
+EVoxelWorkPriority UVoxelStreamingManager::GetPriorityForCoordinate(const FVoxelChunkCoordinate& Coordinate, const FVoxelChunkCoordinate& ViewerChunk) const
+{
+	return GetPriorityForDistance(ViewerChunk.ChebyshevDistanceTo(Coordinate));
 }
 
 void UVoxelStreamingManager::Tick(float DeltaTime)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Voxel_StreamingTick);
+
 	if (!WorldSubsystem) return;
 
 	const FVector ViewerWorld = bUseManualViewer ? ManualViewerPosition : GetAutoViewerPosition();
 	const FVoxelChunkCoordinate ViewerChunk = WorldToChunkCoordinate(ViewerWorld);
 
-	// --- Recompute desired/unload sets when viewer moves to a new chunk ---
-	if (bFirstTick || !(ViewerChunk == LastViewerChunk))
+	// In frozen mode (Mode D), keep existing resident chunks
+	if (bStreamingFrozen)
 	{
+		LastTickBudgetUsedMs = 0.0f;
+		return;
+	}
+
+	const bool bViewerMoved = !(ViewerChunk == LastViewerChunk);
+
+	// --- Recompute desired/unload sets when viewer moves or settings change ---
+	if (bFirstTick || bViewerMoved || bForceQueueReevaluation)
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Voxel_QueueEvaluation);
 		LastViewerChunk = ViewerChunk;
 		bFirstTick = false;
+		bForceQueueReevaluation = false;
 
-		// Compute the desired set (within GenerationDistance, Z-clamped, sorted by distance).
-		const TArray<FVoxelChunkCoordinate> DesiredCoords =
-			VoxelStreaming::ComputeDesiredCoordinates(ViewerChunk, GenerationDistance, WorldHeightInChunks);
-
-		// Build new request list: desired coords that aren't already managed.
-		const TSet<FVoxelChunkCoordinate> DesiredSet(DesiredCoords);
+		// 1. Build new request list from pre-sorted relative offsets in O(N) with zero heap reallocations.
 		PendingRequests.Reset();
-		for (const FVoxelChunkCoordinate& Coord : DesiredCoords)
+		PendingRequestIndex = 0;
+		for (const FIntVector& Offset : CachedRelativeOffsets)
 		{
-			if (!ManagedCoordinates.Contains(Coord))
+			const int32 CZ = ViewerChunk.Z + Offset.Z;
+			if (CZ >= 0 && CZ < WorldHeightInChunks)
 			{
-				PendingRequests.Add(Coord); // already sorted by distance from ComputeDesiredCoordinates
+				const FVoxelChunkCoordinate Candidate(ViewerChunk.X + Offset.X, ViewerChunk.Y + Offset.Y, CZ);
+				if (!ManagedCoordinates.Contains(Candidate))
+				{
+					PendingRequests.Add(Candidate);
+				}
 			}
 		}
 
-		// Build unload list: managed coords that are now outside PersistenceDistance.
+		// 2. Merged single-pass over ManagedCoordinates for Unloads + Visibility (eliminates redundant pass & duplicate distance work).
 		PendingUnloads.Reset();
+		PendingUnloadIndex = 0;
 		for (const FVoxelChunkCoordinate& Coord : ManagedCoordinates)
 		{
-			if (ViewerChunk.ChebyshevDistanceTo(Coord) > PersistenceDistance)
+			const int32 Dist = ViewerChunk.ChebyshevDistanceTo(Coord);
+			const EVoxelStreamingBand Band = VoxelStreaming::ClassifyChunkDistance(
+				Dist, SimulationDistance, RenderDistance, GenerationDistance, PersistenceDistance);
+
+			if (Band == EVoxelStreamingBand::OutOfRange)
 			{
 				PendingUnloads.Add(Coord);
 			}
+
+			const bool bShouldBeVisible = (Band <= EVoxelStreamingBand::Render);
+			const bool bIsCurrentlyVisible = VisibleCoordinates.Contains(Coord);
+			if (bShouldBeVisible != bIsCurrentlyVisible)
+			{
+				if (bShouldBeVisible)
+				{
+					VisibleCoordinates.Add(Coord);
+				}
+				else
+				{
+					VisibleCoordinates.Remove(Coord);
+				}
+				WorldSubsystem->SetChunkVisible(Coord, bShouldBeVisible);
+			}
+
+			// Collision simulation band management
+			const bool bShouldHaveCollision = (Band <= EVoxelStreamingBand::Simulation);
+			if (bShouldHaveCollision)
+			{
+				if (WorldSubsystem->IsChunkReady(Coord))
+				{
+					const EVoxelCollisionState ColState = WorldSubsystem->GetChunkCollisionState(Coord);
+					if (ColState == EVoxelCollisionState::NotRequired)
+					{
+						WorldSubsystem->RequestChunkCollision(Coord, EVoxelWorkPriority::High);
+					}
+				}
+			}
+			else if (WorldSubsystem->HasChunkCollision(Coord))
+			{
+				WorldSubsystem->UnloadChunkCollision(Coord);
+			}
 		}
 
-		UE_LOG(LogVoxelStreaming, Verbose, TEXT("Viewer moved to (%d,%d,%d): %d new requests, %d unloads queued"),
+		UE_LOG(LogVoxelStreaming, Verbose, TEXT("Viewer (%d,%d,%d): %d new requests, %d unloads queued"),
 			ViewerChunk.X, ViewerChunk.Y, ViewerChunk.Z, PendingRequests.Num(), PendingUnloads.Num());
 	}
 
-	// --- Budget-limited processing ---
+	// --- Budget-limited processing (Adaptive Streaming Budget) ---
+	float EffectiveBudgetMs = StreamingBudgetMs;
+	if (DeltaTime > 0.0333f) // Frame taking >33.3ms (missing 30 FPS target) - back off heavily to recover frame pacing
+	{
+		EffectiveBudgetMs = FMath::Max(0.1f, StreamingBudgetMs * 0.2f);
+	}
+	else if (DeltaTime > 0.0167f) // Frame taking >16.7ms (missing 60 FPS target) - throttle down moderately
+	{
+		EffectiveBudgetMs = FMath::Max(0.3f, StreamingBudgetMs * 0.5f);
+	}
+
 	const double BudgetStart = FPlatformTime::Seconds();
-	const double BudgetEnd = BudgetStart + StreamingBudgetMs * 0.001;
+	const double BudgetEnd = BudgetStart + EffectiveBudgetMs * 0.001;
 
 	// Process requests first (loading is more important than unloading).
-	while (PendingRequests.Num() > 0 && FPlatformTime::Seconds() < BudgetEnd)
+	int32 RequestLoopCount = 0;
+	while (PendingRequestIndex < PendingRequests.Num())
 	{
-		const FVoxelChunkCoordinate Coord = PendingRequests[0];
-		PendingRequests.RemoveAt(0, EAllowShrinking::No);
+		// Poll FPlatformTime every 8 iterations to reduce clock syscall overhead
+		if ((RequestLoopCount++ & 0x7) == 0 && FPlatformTime::Seconds() >= BudgetEnd)
+		{
+			break;
+		}
+
+		const FVoxelChunkCoordinate Coord = PendingRequests[PendingRequestIndex++];
 
 		if (!ManagedCoordinates.Contains(Coord)) // double-check in case of overlap with prior tick
 		{
-			WorldSubsystem->RequestChunk(Coord);
+			const int32 Dist = ViewerChunk.ChebyshevDistanceTo(Coord);
+			const EVoxelWorkPriority Priority = GetPriorityForDistance(Dist);
+			WorldSubsystem->RequestChunk(Coord, Priority);
 			ManagedCoordinates.Add(Coord);
+
+			// If already within RenderDistance, register desired visibility
+			if (Dist <= RenderDistance)
+			{
+				VisibleCoordinates.Add(Coord);
+			}
 		}
+	}
+	if (PendingRequestIndex >= PendingRequests.Num())
+	{
+		PendingRequests.Reset();
+		PendingRequestIndex = 0;
 	}
 
 	// Process unloads with remaining budget.
-	while (PendingUnloads.Num() > 0 && FPlatformTime::Seconds() < BudgetEnd)
+	int32 UnloadLoopCount = 0;
+	while (PendingUnloadIndex < PendingUnloads.Num())
 	{
-		const FVoxelChunkCoordinate Coord = PendingUnloads[0];
-		PendingUnloads.RemoveAt(0, EAllowShrinking::No);
+		// Poll FPlatformTime every 8 iterations
+		if ((UnloadLoopCount++ & 0x7) == 0 && FPlatformTime::Seconds() >= BudgetEnd)
+		{
+			break;
+		}
+
+		const FVoxelChunkCoordinate Coord = PendingUnloads[PendingUnloadIndex++];
 
 		if (ManagedCoordinates.Contains(Coord))
 		{
+			VisibleCoordinates.Remove(Coord);
 			WorldSubsystem->UnloadChunk(Coord);
 			ManagedCoordinates.Remove(Coord);
 		}
 	}
-
-	// --- Visibility toggling (RenderDistance) ---
-	// Cheap per-frame check: iterate managed coords, toggle visibility based
-	// on whether they're within RenderDistance. SetVisibility is a no-op if
-	// the state hasn't changed, so this doesn't trigger redundant work.
-	// SetChunkVisible is a no-op if the chunk has no component (in-flight or all-air).
-	for (const FVoxelChunkCoordinate& Coord : ManagedCoordinates)
+	if (PendingUnloadIndex >= PendingUnloads.Num())
 	{
-		const int32 Dist = ViewerChunk.ChebyshevDistanceTo(Coord);
-		const EVoxelStreamingBand Band = VoxelStreaming::ClassifyChunkDistance(
-			Dist, SimulationDistance, RenderDistance, GenerationDistance, PersistenceDistance);
-		const bool bShouldBeVisible = (Band <= EVoxelStreamingBand::Render);
-
-		WorldSubsystem->SetChunkVisible(Coord, bShouldBeVisible);
+		PendingUnloads.Reset();
+		PendingUnloadIndex = 0;
 	}
 
 	LastTickBudgetUsedMs = static_cast<float>((FPlatformTime::Seconds() - BudgetStart) * 1000.0);
 
-	if (PendingRequests.Num() > 0 || PendingUnloads.Num() > 0)
+	const int32 RemainingRequests = PendingRequests.Num() - PendingRequestIndex;
+	const int32 RemainingUnloads = PendingUnloads.Num() - PendingUnloadIndex;
+	if (RemainingRequests > 0 || RemainingUnloads > 0)
 	{
 		UE_LOG(LogVoxelStreaming, Verbose, TEXT("Budget exhausted: %d requests, %d unloads remaining (used %.2fms)"),
-			PendingRequests.Num(), PendingUnloads.Num(), LastTickBudgetUsedMs);
+			RemainingRequests, RemainingUnloads, LastTickBudgetUsedMs);
 	}
 }

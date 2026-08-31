@@ -127,11 +127,11 @@ bool FVoxelMesherAmbientOcclusionTest::RunTest(const FString& Parameters)
 	{
 		if (Vertex.Normal.Z > 0.5f) // top-face vertices only
 		{
-			if (Vertex.Position.Equals(FVector(1, 1, 1), 0.01f))
+			if (Vertex.Position.Equals(FVector3f(1, 1, 1), 0.01f))
 			{
 				NearCorner = &Vertex;
 			}
-			else if (Vertex.Position.Equals(FVector(2, 1, 1), 0.01f))
+			else if (Vertex.Position.Equals(FVector3f(2, 1, 1), 0.01f))
 			{
 				FarCorner = &Vertex;
 			}
@@ -142,11 +142,56 @@ bool FVoxelMesherAmbientOcclusionTest::RunTest(const FString& Parameters)
 	TestNotNull(TEXT("Should find the far-from-wall top-face corner vertex"), FarCorner);
 	if (NearCorner && FarCorner)
 	{
-		AddInfo(FString::Printf(TEXT("Near-wall corner AO intensity: %.3f, far corner: %.3f"), NearCorner->Color.R, FarCorner->Color.R));
+		AddInfo(FString::Printf(TEXT("Near-wall corner AO uint8: %d, far corner uint8: %d"), NearCorner->Color.R, FarCorner->Color.R));
 		TestTrue(TEXT("Corner adjacent to a neighboring solid voxel should be darker (lower intensity) than an open corner"),
 			NearCorner->Color.R < FarCorner->Color.R);
-		TestEqual(TEXT("Fully open corner should be at full intensity (AO=3/3)"), FarCorner->Color.R, 1.0f);
+		TestEqual(TEXT("Fully open corner should be at full intensity (AO=3/3 -> 255)"), FarCorner->Color.R, static_cast<uint8>(255));
 	}
+	return true;
+}
+
+// ---- Neighbor-Aware Boundary Culling & Vertex Size Test ----
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelMesherNeighborCullingTest, "Voxel.Meshing.NeighborBoundaryCulling",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FVoxelMesherNeighborCullingTest::RunTest(const FString& Parameters)
+{
+	// 1. Verify exact sizeof(FVoxelMeshVertex) is 36 bytes
+	const size_t VertexSize = sizeof(FVoxelMeshVertex);
+	AddInfo(FString::Printf(TEXT("Measured sizeof(FVoxelMeshVertex): %llu bytes"), static_cast<uint64>(VertexSize)));
+	TestEqual(TEXT("FVoxelMeshVertex layout must be exactly 36 bytes"), VertexSize, static_cast<size_t>(36));
+
+	// 2. Build two fully solid 4x4x4 chunks touching along X
+	FVoxelChunk ChunkA(4);
+	FVoxelChunk ChunkB(4);
+	for (int32 Z = 0; Z < 4; ++Z)
+	{
+		for (int32 Y = 0; Y < 4; ++Y)
+		{
+			for (int32 X = 0; X < 4; ++X)
+			{
+				ChunkA.SetBlock(X, Y, Z, 1, true);
+				ChunkB.SetBlock(X, Y, Z, 1, true);
+			}
+		}
+	}
+
+	// Without neighbor awareness: ChunkA produces 6 quads (24 verts, 12 tris)
+	const FVoxelMeshData MeshWithoutNeighbor = FVoxelMesher::GenerateMesh(ChunkA, nullptr);
+	TestEqual(TEXT("Isolated solid chunk without neighbors has 6 outer faces (24 verts)"), MeshWithoutNeighbor.Vertices.Num(), 24);
+
+	// With neighbor awareness: ChunkB is neighbor to the right (+X) of ChunkA
+	FVoxelNeighborChunks Neighbors;
+	Neighbors.PosX = &ChunkB;
+
+	const FVoxelMeshData MeshWithNeighbor = FVoxelMesher::GenerateMesh(ChunkA, nullptr, &Neighbors);
+
+	// The +X face of ChunkA touches the -X face of ChunkB (both fully solid) -> +X face must be culled!
+	// 5 remaining faces * 4 vertices = 20 vertices (10 triangles)
+	TestEqual(TEXT("Neighbor-aware solid chunk culls touching +X boundary face (20 verts)"), MeshWithNeighbor.Vertices.Num(), 20);
+	TestEqual(TEXT("Neighbor-aware solid chunk has 10 triangles"), MeshWithNeighbor.GetTotalTriangleCount(), 10);
+
 	return true;
 }
 
@@ -203,8 +248,6 @@ bool FVoxelMesherPerfLogTest::RunTest(const FString& Parameters)
 	AddInfo(FString::Printf(TEXT("Meshing a %dx%dx%d generated chunk: %.3f ms, %d vertices, %d triangles, %d sections"),
 		ChunkSize, ChunkSize, ChunkSize, ElapsedMs, MeshData.Vertices.Num(), MeshData.GetTotalTriangleCount(), MeshData.Sections.Num()));
 
-	// No pass/fail threshold yet - same reasoning as Voxel.Generation.PerfLog:
-	// needs a profiled on-device baseline before a real budget is meaningful.
 	return true;
 }
 
