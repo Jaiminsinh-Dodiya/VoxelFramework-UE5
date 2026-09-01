@@ -339,6 +339,12 @@ void UVoxelStreamingManager::Tick(float DeltaTime)
 			{
 				VisibleCoordinates.Add(Coord);
 			}
+
+			// If within SimulationDistance, request collision immediately (Queued if generation incomplete)
+			if (Dist <= SimulationDistance)
+			{
+				WorldSubsystem->RequestChunkCollision(Coord, EVoxelWorkPriority::Critical);
+			}
 		}
 	}
 	if (PendingRequestIndex >= PendingRequests.Num())
