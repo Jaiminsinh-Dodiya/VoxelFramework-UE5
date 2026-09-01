@@ -18,6 +18,7 @@
 
 #include "CoreMinimal.h"
 #include "VoxelCoreTypes.h"
+#include "VoxelGenerationConfig.h"
 
 class UVoxelBlockRegistry;
 class UVoxelBiomeDefinition;
@@ -39,6 +40,8 @@ struct FVoxelGenerationContext
 
 	const UVoxelBlockRegistry* BlockRegistry = nullptr;
 	TArray<const UVoxelBiomeDefinition*> AvailableBiomes; // candidate set BiomePass selects from
+	const FVoxelGenerationConfig* Config = nullptr; // Optional runtime configuration (falls back to defaults if nullptr)
+
 
 	// Indexed [X + Y * ChunkSize] - one entry per column in this chunk, shared across all Z passes.
 	TArray<FVoxelColumnData> Columns;

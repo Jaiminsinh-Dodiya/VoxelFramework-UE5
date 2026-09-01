@@ -20,10 +20,5 @@ class FTerrainPass : public IVoxelGenerationPass
 public:
 	virtual const TCHAR* GetPassName() const override { return TEXT("TerrainPass"); }
 	virtual void Execute(FVoxelGenerationContext& Context, FVoxelChunk& Chunk) override;
-
-private:
-	static constexpr int32 NoiseOctaves = 4;
-	static constexpr float BaseFrequency = 0.01f;
-	static constexpr float HeightAmplitude = 40.0f;
-	static constexpr int32 BaseHeight = 64;
 };
+

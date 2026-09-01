@@ -6,6 +6,9 @@
 
 void FClimatePass::Execute(FVoxelGenerationContext& Context, FVoxelChunk& Chunk)
 {
+	static const FVoxelClimateConfig DefaultClimate;
+	const FVoxelClimateConfig& Climate = Context.Config ? Context.Config->Climate : DefaultClimate;
+
 	for (int32 LocalY = 0; LocalY < Context.ChunkSize; ++LocalY)
 	{
 		for (int32 LocalX = 0; LocalX < Context.ChunkSize; ++LocalX)
@@ -13,14 +16,14 @@ void FClimatePass::Execute(FVoxelGenerationContext& Context, FVoxelChunk& Chunk)
 			const FVector2D WorldColumn = Context.LocalToWorldColumn(LocalX, LocalY);
 
 			const float TemperatureNoise = VoxelNoise::Sample2D(
-				Context.WorldSeed + TemperatureSeedOffset,
-				WorldColumn.X * ClimateFrequency,
-				WorldColumn.Y * ClimateFrequency);
+				Context.WorldSeed + Climate.TemperatureSeedOffset,
+				WorldColumn.X * Climate.Frequency,
+				WorldColumn.Y * Climate.Frequency);
 
 			const float HumidityNoise = VoxelNoise::Sample2D(
-				Context.WorldSeed + HumiditySeedOffset,
-				WorldColumn.X * ClimateFrequency,
-				WorldColumn.Y * ClimateFrequency);
+				Context.WorldSeed + Climate.HumiditySeedOffset,
+				WorldColumn.X * Climate.Frequency,
+				WorldColumn.Y * Climate.Frequency);
 
 			FVoxelColumnData& Column = Context.ColumnAt(LocalX, LocalY);
 			// Remap noise [-1,1] -> [0,1] to match the range biome definitions author against.
@@ -29,3 +32,4 @@ void FClimatePass::Execute(FVoxelGenerationContext& Context, FVoxelChunk& Chunk)
 		}
 	}
 }
+

@@ -31,7 +31,8 @@ void FVoxelGenerationPipeline::GenerateChunk(
 	int32 ChunkSize,
 	const UVoxelBlockRegistry* BlockRegistry,
 	const TArray<const UVoxelBiomeDefinition*>& AvailableBiomes,
-	FVoxelChunk& OutChunk) const
+	FVoxelChunk& OutChunk,
+	const FVoxelGenerationConfig* GenerationConfig) const
 {
 	FVoxelGenerationContext Context;
 	Context.WorldSeed = WorldSeed;
@@ -39,6 +40,7 @@ void FVoxelGenerationPipeline::GenerateChunk(
 	Context.ChunkSize = ChunkSize;
 	Context.BlockRegistry = BlockRegistry;
 	Context.AvailableBiomes = AvailableBiomes;
+	Context.Config = GenerationConfig;
 	Context.InitColumns();
 
 	for (const TUniquePtr<IVoxelGenerationPass>& Pass : Passes)
@@ -46,3 +48,4 @@ void FVoxelGenerationPipeline::GenerateChunk(
 		Pass->Execute(Context, OutChunk);
 	}
 }
+

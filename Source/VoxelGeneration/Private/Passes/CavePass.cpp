@@ -5,16 +5,16 @@
 #include "VoxelChunk.h"
 #include "VoxelNoise.h"
 
-namespace
-{
-	// Different seed channel than Terrain/Climate (see ClimatePass for the
-	// same pattern) so cave shape is independent of terrain height/biome
-	// noise fields rather than correlated with them.
-	constexpr int32 CaveSeedOffset = 5000;
-}
-
 void FCavePass::Execute(FVoxelGenerationContext& Context, FVoxelChunk& Chunk)
 {
+	static const FVoxelCaveConfig DefaultCaves;
+	const FVoxelCaveConfig& Caves = Context.Config ? Context.Config->Caves : DefaultCaves;
+
+	if (!Caves.bEnabled)
+	{
+		return;
+	}
+
 	const int32 ChunkSize = Context.ChunkSize;
 	const int32 ChunkBaseZ = Context.ChunkCoordinate.Z * ChunkSize;
 
@@ -32,7 +32,7 @@ void FCavePass::Execute(FVoxelGenerationContext& Context, FVoxelChunk& Chunk)
 				// Surface protection: never carve at or above (TerrainHeight -
 				// SurfaceProtectionDepth). Also nothing to carve above the
 				// surface anyway - it's already air from TerrainPass.
-				if (WorldZ > Column.TerrainHeight - SurfaceProtectionDepth)
+				if (WorldZ > Column.TerrainHeight - Caves.SurfaceProtectionDepth)
 				{
 					continue;
 				}
@@ -44,18 +44,20 @@ void FCavePass::Execute(FVoxelGenerationContext& Context, FVoxelChunk& Chunk)
 				}
 
 				const float Density = VoxelNoise::FractalBrownianMotion3D(
-					Context.WorldSeed + CaveSeedOffset,
-					WorldColumn.X * DensityFrequency,
-					WorldColumn.Y * DensityFrequency,
-					WorldZ * DensityFrequency,
-					NoiseOctaves);
+					Context.WorldSeed + Caves.CaveSeedOffset,
+					WorldColumn.X * Caves.DensityFrequency,
+					WorldColumn.Y * Caves.DensityFrequency,
+					WorldZ * Caves.DensityFrequency,
+					Caves.NoiseOctaves,
+					Caves.Lacunarity,
+					Caves.Persistence);
 
 				// FractalBrownianMotion3D returns roughly [-1,1]; remap to
 				// [0,1] so CarveThreshold reads naturally as "carve the top
 				// X% densest pockets" rather than requiring a negative constant.
 				const float RemappedDensity = (Density + 1.0f) * 0.5f;
 
-				if (RemappedDensity > CarveThreshold)
+				if (RemappedDensity > Caves.CarveThreshold)
 				{
 					Chunk.SetBlock(LocalX, LocalY, LocalZ, VoxelBlockId_Air, /*bIsGenerationWrite=*/true);
 				}
@@ -63,3 +65,4 @@ void FCavePass::Execute(FVoxelGenerationContext& Context, FVoxelChunk& Chunk)
 		}
 	}
 }
+
