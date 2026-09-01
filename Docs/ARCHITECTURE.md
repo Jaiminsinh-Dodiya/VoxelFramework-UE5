@@ -210,12 +210,18 @@ graph TD
    - **Solution**: Collision is now requested immediately when a coordinate first becomes managed if `Dist <= SimulationDistance`.
    - **Queued Collision Safety**: `RequestChunkCollision` gracefully transitions not-yet-ready chunks to `EVoxelCollisionState::Queued`. When terrain generation finishes, `FinalizeChunkMesh` triggers collision building at `High` priority, achieving automated collision readiness without requiring any per-frame scanning or player movement.
    - **Game Agnostic**: VoxelFramework contains zero dependencies on `PlayerStart`, `GameMode`, or Character classes.
+14. **Configuration, Authoring & Developer UX Architecture (Phase 8)**:
+    - **Composition-Based World Definition**: `UVoxelWorldDefinition` acts as a top-level composite asset referencing `UVoxelGenerationDefinition`, `UVoxelStreamingPreset`, `UVoxelPhysicsPreset`, and material maps without monolithic property bloat.
+    - **Worker-Safe Runtime Structs**: All generation settings authored in `UVoxelGenerationDefinition` are translated into plain `FVoxelGenerationConfig` structs at world initialization on the Game Thread. Worker threads receive immutable `const FVoxelGenerationConfig*` pointers, guaranteeing zero UObject contention off the Game Thread.
+    - **Domain-Specific Preset Ownership**: Presets are housed strictly within their owning module domains (`UVoxelStreamingPreset` in `VoxelAssets`, `UVoxelPhysicsPreset` in `VoxelPhysics`).
+    - **Predictable Blueprint Query Semantics**: Spatial queries (`TryGetBlockAtWorldPosition`, `TryIsSolidAtWorldPosition`) use explicit residency checks (`bool Try...`), ensuring pure Blueprint nodes never trigger synchronous generation or frame stalls.
+    - **Actionable Configuration Validation**: `UVoxelConfigValidator` provides designer feedback with actionable suggestions for missing references, duplicate block IDs, and invalid ranges without enforcing arbitrary distance band constraints.
 
 ---
 
 ## 8. Design checkpoint — World/Game Design (frozen pending decisions)
 
-**Status: `VoxelRendering`, `VoxelWorld`, `VoxelStreaming`, and `Phase 6.3 Mobile Scalability Hardening` complete. Still open for anything touching Regions/Island Foundation.**
+**Status: `VoxelRendering`, `VoxelWorld`, `VoxelStreaming`, `VoxelPhysics`, and `Phase 8 Framework Authoring & Developer UX` complete. Still open for anything touching Regions/Island Foundation.**
 
 The project's scope has clarified since Phase 0: this is a **reusable framework whose first production customer is a specific game**, not a generic infinite-world voxel engine.
 
@@ -226,8 +232,8 @@ The project's scope has clarified since Phase 0: this is a **reusable framework 
 
 ### Architecture impact analysis
 
-- **No conflict** with ADR-001 through ADR-005, or any existing type.
-- **One real open architectural question**, unchanged since the checkpoint opened: region/island data is inherently **global**, not derivable from a single chunk's coordinate. Needs a precomputed, read-only structure, same pattern as `UVoxelBlockRegistry::PrecacheBiomeLayers` at world scale. **Should become its own ADR (ADR-006) before any region code is written.**
+- **No conflict** with ADR-001 through ADR-007, or any existing type.
+- **One real open architectural question**, unchanged since the checkpoint opened: region/island data is inherently **global**, not derivable from a single chunk's coordinate. Needs a precomputed, read-only structure, same pattern as `UVoxelBlockRegistry::PrecacheBiomeLayers` at world scale.
 
 ---
 
