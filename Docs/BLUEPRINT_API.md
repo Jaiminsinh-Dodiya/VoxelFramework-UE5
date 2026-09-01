@@ -5,26 +5,83 @@
 
 ---
 
-## How to Access the Voxel Subsystems in Blueprints
+## How to Access Voxel Functions in Blueprints
 
-VoxelFramework uses **World Subsystems** — they exist automatically in every world. You do NOT need to spawn or place any actor.
+VoxelFramework provides **two ways** to call its functions from Blueprints:
 
-### Getting UVoxelWorldSubsystem
-```
-Get Subsystem (Voxel World Subsystem)
-```
-- Right-click in any Blueprint graph → search **"Get Subsystem"**
-- Select **"Get World Subsystem"**
-- In the class selector, choose **VoxelWorldSubsystem**
-- This works from **any** Blueprint (Actor, Character, Widget, GameMode, etc.)
+### Method 1: Static Blueprint Libraries (Recommended — Easiest)
 
-### Getting UVoxelStreamingManager
-```
-Get Subsystem (Voxel Streaming Manager)
-```
-- Same process as above, select **VoxelStreamingManager**
+VoxelFramework includes **static function libraries** that work from **any** Blueprint without needing to manually get a subsystem reference. Just right-click in the graph and search:
+
+| Search For | What You Get |
+|---|---|
+| `World Position to Chunk Coordinate` | Converts actor location → chunk coord |
+| `Try Get Block at World Position` | Gets the block ID at a location |
+| `Try Is Solid at World Position` | Checks if block is solid |
+| `Is Chunk Loaded` | Checks if a chunk is generated |
+| `Is Chunk Collision Ready` | Checks if collision is cooked |
+| `Apply World Definition` | Applies a world config asset |
+| `Set Streaming Render Distance` | Changes render distance at runtime |
+| `Set Streaming Simulation Distance` | Changes physics collision distance |
+| `Apply Streaming Preset` | Applies a streaming preset asset |
+| `Set Streaming Frozen` | Freezes chunk loading (debug) |
+
+These come from `UVoxelBlueprintLibrary` (world queries) and `UVoxelStreamingBlueprintLibrary` (streaming controls). The `WorldContextObject` pin is auto-filled by Unreal — you don't need to wire it.
+
+### Method 2: World Subsystem References (Advanced)
+
+For full access to every function, get the subsystem directly:
+
+**VoxelWorldSubsystem:**
+- Right-click in graph → search **"Get Subsystem"** → **"Get World Subsystem"** → class: **VoxelWorldSubsystem**
+
+**VoxelStreamingManager:**
+- Same process, class: **VoxelStreamingManager**
+
+This works from any Blueprint (Actor, Character, Widget, GameMode, etc.).
 
 ---
+
+## 0. Static Blueprint Libraries (UVoxelBlueprintLibrary & UVoxelStreamingBlueprintLibrary)
+
+These are the **easiest** way to use VoxelFramework from Blueprints. All functions appear directly in the right-click search without needing a subsystem reference.
+
+### UVoxelBlueprintLibrary (Category: `Voxel|World`, `Voxel|Query`, `Voxel|Chunk`)
+
+Source: `VoxelWorld/Public/VoxelBlueprintLibrary.h`
+
+| Node Name | Category | Inputs | Outputs | Description |
+|---|---|---|---|---|
+| `Get Voxel World Subsystem` | `Voxel\|World` | *(auto)* | `UVoxelWorldSubsystem*` | Returns the world subsystem instance. |
+| `World Position to Chunk Coordinate` | `Voxel\|Query` | `WorldPosition` (FVector) | `FIntVector` | Converts world location to chunk coordinate. Input: `GetActorLocation`. |
+| `Try Get Block at World Position` | `Voxel\|Query` | `WorldPosition` (FVector) | `bool` (success), `OutBlockId` (int) | Gets block ID. Returns false if chunk not loaded. |
+| `Try Is Solid at World Position` | `Voxel\|Query` | `WorldPosition` (FVector) | `bool` (success), `bOutIsSolid` (bool) | Checks solid/air. Returns false if chunk not loaded. |
+| `Is Chunk Loaded` | `Voxel\|Chunk` | `ChunkCoord` (FIntVector) | `bool` | True if chunk is generated and resident. |
+| `Is Chunk Collision Ready` | `Voxel\|Chunk` | `ChunkCoord` (FIntVector) | `bool` | True if physics collision is active. |
+| `Get Chunk Size` | `Voxel\|World` | *(auto)* | `int32` | Chunk edge size in voxels (e.g. 32). |
+| `Get World Seed` | `Voxel\|World` | *(auto)* | `int32` | Active world generation seed. |
+| `Get Voxel World Size` | `Voxel\|World` | *(auto)* | `float` | Voxel size in cm (default 100 = 1m). |
+| `Is World Initialized` | `Voxel\|World` | *(auto)* | `bool` | True if voxel world is ready. |
+| `Apply World Definition` | `Voxel\|World` | `WorldDefinition` (UVoxelWorldDefinition*) | *none* | Applies a world config data asset. |
+
+### UVoxelStreamingBlueprintLibrary (Category: `Voxel|Streaming`, `Voxel|Development`)
+
+Source: `VoxelStreaming/Public/VoxelStreamingBlueprintLibrary.h`
+
+| Node Name | Category | Inputs | Outputs | Description |
+|---|---|---|---|---|
+| `Get Voxel Streaming Manager` | `Voxel\|Streaming` | *(auto)* | `UVoxelStreamingManager*` | Returns the streaming manager. |
+| `Apply Streaming Preset` | `Voxel\|Streaming` | `Preset` (UVoxelStreamingPreset*) | *none* | Applies all distance bands + budget from preset. |
+| `Set Streaming Render Distance` | `Voxel\|Streaming` | `NewRenderDistance` (int, chunks) | *none* | Sets visible chunk radius. |
+| `Get Streaming Render Distance` | `Voxel\|Streaming` | *(auto)* | `int32` | Current render distance in chunks. |
+| `Set Streaming Simulation Distance` | `Voxel\|Streaming` | `NewSimulationDistance` (int, chunks) | *none* | Sets physics collision radius. |
+| `Get Streaming Simulation Distance` | `Voxel\|Streaming` | *(auto)* | `int32` | Current simulation distance in chunks. |
+| `Set Streaming Budget Ms` | `Voxel\|Streaming` | `NewBudgetMs` (float) | *none* | Sets frame time budget for streaming. |
+| `Get Streaming Budget Ms` | `Voxel\|Streaming` | *(auto)* | `float` | Current streaming budget in ms. |
+| `Set Streaming Frozen` | `Voxel\|Development` | `bFrozen` (bool) | *none* | Freezes/unfreezes chunk loading. |
+| `Is Streaming Frozen` | `Voxel\|Development` | *(auto)* | `bool` | True if streaming is frozen. |
+
+
 
 ## 1. UVoxelWorldSubsystem — Blueprint Functions
 
