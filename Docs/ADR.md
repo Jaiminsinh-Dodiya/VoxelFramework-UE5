@@ -136,6 +136,23 @@ a unified hardware ray-tracing / collision proxy that renders and collides nativ
 
 ---
 
+## ADR-007: Data-Driven Configuration Precedence and Worker-Safe Runtime Structs
+
+**Decision:** World configuration uses a strict 4-tier precedence model:
+`Project Settings (UVoxelRuntimeSettings)` → `World Definition (UVoxelWorldDefinition)` → `Presets (UVoxelStreamingPreset, UVoxelPhysicsPreset)` → `Runtime Blueprint Overrides`.
+
+All designer-facing UDataAssets are converted into plain, immutable C++ structs (`FVoxelGenerationConfig`, `FVoxelClimateConfig`, `FVoxelTerrainConfig`, `FVoxelCaveConfig`) at initialization on the Game Thread before being passed to worker threads. Worker threads NEVER access mutable UObjects or DataAssets directly.
+
+Key design rules:
+1. **Composition over Monolithic Assets:** `UVoxelWorldDefinition` is a thin composition asset that references specialized sub-assets (`UVoxelGenerationDefinition`, `UVoxelStreamingPreset`, etc.) rather than containing hundreds of flattened properties.
+2. **Domain-Specific Preset Ownership:** Presets live in their respective modules (`UVoxelStreamingPreset` in `VoxelAssets`, `UVoxelPhysicsPreset` in `VoxelPhysics`).
+3. **Explicit Blueprint Query Semantics:** Query functions (e.g. `TryGetBlockAtWorldPosition`, `TryIsSolidAtWorldPosition`) use explicit residency semantics (`bool Try...`) and NEVER silently trigger synchronous generation or chunk loading from pure nodes.
+4. **Validation without Policy Assumptions:** `UVoxelConfigValidator` verifies explicit errors and actionable warnings without forcing artificial constraints on independent distance bands.
+
+**Why:** Decouples authoring and designer workflows from runtime threading constraints while guaranteeing thread safety and eliminating race conditions.
+
+---
+
 ## Performance budgets (design constraints, not aspirations)
 
 | System | Budget |
@@ -149,3 +166,4 @@ a unified hardware ray-tracing / collision proxy that renders and collides nativ
 | Serialization | Must never block Game Thread |
 
 Any new feature gets checked against this table before it's added, not after.
+
