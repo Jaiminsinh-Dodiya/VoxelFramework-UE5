@@ -205,6 +205,11 @@ graph TD
    - Merged `PendingUnloads` collection and visibility updates into a single pass over `ManagedCoordinates`, eliminating redundant iterations and duplicate distance calculations.
    - Distance evaluations in the request loop are computed once via `GetPriorityForDistance(Dist)`.
    - Time budget queries poll `FPlatformTime::Seconds()` every 8 iterations to minimize clock syscall overhead.
+13. **Spawn Collision Initialization Fix (Lifecycle-Driven Collision)**:
+   - **Problem**: On initial startup/spawn, `ManagedCoordinates` was empty during the re-evaluation pass. When newly discovered spawn coordinates were added to `ManagedCoordinates` later in the frame, they missed the collision request. If the player remained stationary, `bViewerMoved` stayed `false` and collision was never requested.
+   - **Solution**: Collision is now requested immediately when a coordinate first becomes managed if `Dist <= SimulationDistance`.
+   - **Queued Collision Safety**: `RequestChunkCollision` gracefully transitions not-yet-ready chunks to `EVoxelCollisionState::Queued`. When terrain generation finishes, `FinalizeChunkMesh` triggers collision building at `High` priority, achieving automated collision readiness without requiring any per-frame scanning or player movement.
+   - **Game Agnostic**: VoxelFramework contains zero dependencies on `PlayerStart`, `GameMode`, or Character classes.
 
 ---
 

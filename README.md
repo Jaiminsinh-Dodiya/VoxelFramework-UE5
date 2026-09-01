@@ -89,9 +89,9 @@ graph TD;
 9. **Precomputed Relative Offsets & Single-Pass Streaming**: `UVoxelStreamingManager` translates pre-sorted relative offsets in $O(N)$ with 0 heap allocations and 0 runtime sorting on chunk crossings, performing unloads, visibility, and collision simulation in a single unified pass.
 10. **Adaptive Streaming Budget**: Automatically scales down streaming slice on warm/hot frames to protect 60/30 FPS frame pacing on mobile hardware.
 
-## Testing (44 Passing Automation Tests)
+## Testing (45 Passing Automation Tests)
 
-The plugin leverages Unreal's Automation Testing framework with 44 passing tests ensuring complete subsystem integrity:
+The plugin leverages Unreal's Automation Testing framework with 45 passing tests ensuring complete subsystem integrity:
 
 | Suite | Module | Covers |
 |---|---|---|
@@ -136,6 +136,7 @@ The plugin leverages Unreal's Automation Testing framework with 44 passing tests
 | `Voxel.Streaming.NeighborLifetimeSafety` | VoxelStreaming | Neighbor worker lease retention during unload and delayed recycling |
 | `Voxel.Streaming.SchedulerBoundedHistory` | VoxelStreaming | 2,000-job historical bounded retention |
 | `Voxel.Streaming.SchedulerTerminalCompletion` | VoxelStreaming | Terminal completion on queued, running, duplicate, and post-completion cancellations |
+| `Voxel.Streaming.SpawnChunkCollisionWithoutMovement` | VoxelStreaming | Immediate collision request for initial spawn chunk without requiring movement |
 | `Voxel.Streaming.StateMachineTransitions` | VoxelStreaming | Authoritative chunk state machine |
 | `Voxel.Streaming.StorageWorkerLeaseLifecycle` | VoxelStreaming | Safe async chunk leasing without use-after-free |
 | `Voxel.World.RequestUnloadBookkeeping` | VoxelWorld | Subsystem request/unload idempotency |

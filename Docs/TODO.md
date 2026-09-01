@@ -109,11 +109,12 @@ See [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md) §9 for the current honest li
 - [x] **6.4.6 Queue Telemetry Correctness & Reset**:
   - Distinguishes Dequeued Item Latency (Avg, P50, P95, P99, Max) from Oldest Pending Queue Item Age (via queue peek).
   - `ResetDiagnosticStats()` cleanly clears subsystem latency windows.
-- [x] **6.4.7 Automation Tests (28/28 Passing)**:
+- [x] **6.4.7 Automation Tests (29/29 Passing)**:
   - `Voxel.Streaming.SchedulerTerminalCompletion` (queued cancel, duplicate cancel, post-completion cancel)
   - `Voxel.Streaming.NeighborLifetimeSafety` (neighbor lease retention during unload and delayed recycling)
   - `Voxel.Streaming.SchedulerBoundedHistory` (2,000-job historical bounded retention)
   - `Voxel.Streaming.LongRunStress` (1,000-iteration rapid boundary crossing, churn, and slot stability)
+  - `Voxel.Streaming.SpawnChunkCollisionWithoutMovement` (initial spawn coordinate collision request without movement)
 
 ## Just completed: Phase 7 — VoxelPhysics V1 (Real Terrain Collision) ✅
 
@@ -134,10 +135,11 @@ See [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md) §9 for the current honest li
   - Revision/Stale-result protection (`CollisionRevision` counter) rejects obsolete cook completions when chunks are modified or unloaded.
   - `RecreatePhysicsState()` registers collision with Chaos `FPhysScene`.
   - Clean teardown and `AbortPhysicsMeshAsyncCreation()` on chunk unload / world shutdown.
-- [x] **7.5 Streaming Integration**:
+- [x] **7.5 Streaming Integration & Spawn Collision Fix**:
   - Managed by `UVoxelStreamingManager` within `SimulationDistance` band.
+  - Initial discovered coordinates inside `SimulationDistance` immediately submit `RequestChunkCollision` (transitioning to `Queued` until generation completes and `FinalizeChunkMesh` kicks off collision build at `Critical`/`High` priority).
   - Distant chunks beyond `SimulationDistance` release collision components while retaining visual rendering.
-- [x] **7.6 Automation Test Suite (44/44 Passing — Exit Code: 0)**:
+- [x] **7.6 Automation Test Suite (45/45 Passing — Exit Code: 0)**:
   - `Voxel.Physics.Cave`
   - `Voxel.Physics.CookFailure`
   - `Voxel.Physics.Deterministic`
@@ -153,6 +155,7 @@ See [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md) §9 for the current honest li
   - `Voxel.Physics.Slope`
   - `Voxel.Physics.StaleRevision`
   - `Voxel.Physics.UnloadDuringCook`
+  - `Voxel.Streaming.SpawnChunkCollisionWithoutMovement`
 
 ---
 
