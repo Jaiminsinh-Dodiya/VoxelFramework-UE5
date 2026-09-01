@@ -54,15 +54,18 @@
 #include "VoxelMeshData.h"
 #include "VoxelCollisionData.h"
 #include "VoxelPhysicsTypes.h"
+#include "VoxelGenerationConfig.h"
 #include "VoxelWorldSubsystem.generated.h"
 
 class FVoxelChunk;
 class UVoxelBlockRegistry;
 class UVoxelBiomeDefinition;
+class UVoxelWorldDefinition;
 class UVoxelMeshComponent;
 class UVoxelCollisionComponent;
 class UMaterialInterface;
 class AVoxelWorldRenderActor;
+
 
 struct FVoxelCompletedMeshItem
 {
@@ -179,12 +182,59 @@ public:
 	bool IsCpuOnlyMode() const { return bCpuOnlyMode; }
 
 	/** Unloads all active chunks and cancels in-flight jobs. */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|World")
 	void ClearAllChunks();
 
+	/** Applies world definition asset (seed, scale, biomes, materials, generation, presets). */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|World")
+	void ApplyWorldDefinition(const UVoxelWorldDefinition* InWorldDefinition);
+
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
 	int32 GetChunkSize() const { return ChunkSize; }
+
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
 	int32 GetWorldSeed() const { return WorldSeed; }
+
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	float GetVoxelWorldSize() const { return VoxelWorldSize; }
+
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	bool IsWorldInitialized() const { return ChunkStore.IsValid(); }
+
+	/**
+	 * Queries the block ID at a given world position.
+	 * Returns true if the chunk containing this position is resident, false otherwise.
+	 * Will NOT trigger chunk generation or loading.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Query")
+	bool TryGetBlockAtWorldPosition(const FVector& WorldPosition, int32& OutBlockId) const;
+
+	/**
+	 * Queries whether the block at a given world position is solid.
+	 * Returns true if the chunk containing this position is resident, false otherwise.
+	 * Will NOT trigger chunk generation or loading.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Query")
+	bool TryIsSolidAtWorldPosition(const FVector& WorldPosition, bool& bOutIsSolid) const;
+
+	/** Converts world coordinates to integer chunk coordinates. */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Query")
+	FIntVector WorldPositionToChunkCoordinate(const FVector& WorldPosition) const;
+
+	/** Returns true if the specified chunk coordinate has completed generation and is resident. */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Chunk")
+	bool IsChunkLoaded(const FIntVector& ChunkCoord) const;
+
+	/** Returns true if the specified chunk coordinate has active collision ready. */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Chunk")
+	bool IsChunkCollisionReady(const FIntVector& ChunkCoord) const;
+
+	UFUNCTION(BlueprintPure, Category = "Voxel|Chunk")
 	int32 GetReadyChunkCount() const { return ReadyCoordinates.Num(); }
+
+	UFUNCTION(BlueprintPure, Category = "Voxel|Chunk")
 	int32 GetRequestedChunkCount() const { return RequestedCoordinates.Num(); }
+
 	int32 GetFinalizationQueueDepth() const { return FinalizationQueueDepth; }
 	float GetLastFinalizeBudgetUsedMs() const { return LastFinalizeBudgetUsedMs; }
 	int32 GetLastFinalizeCount() const { return LastFinalizeCount; }
@@ -207,6 +257,7 @@ public:
 
 	void SetMaxComponentPoolSize(int32 InMaxSize) { MaxComponentPoolSize = FMath::Max(0, InMaxSize); }
 	int32 GetMaxComponentPoolSize() const { return MaxComponentPoolSize; }
+
 
 private:
 	void ProcessCompletedMeshQueue(float DeltaTime);
@@ -292,7 +343,9 @@ private:
 	int32 WorldSeed = 1234;
 	float VoxelWorldSize = 100.0f;
 	float RenderSubmissionBudgetMs = 1.0f;
+	FVoxelGenerationConfig GenerationConfig;
 
 	float LastFinalizeBudgetUsedMs = 0.0f;
 	int32 LastFinalizeCount = 0;
 };
+

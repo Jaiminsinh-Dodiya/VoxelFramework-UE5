@@ -23,18 +23,25 @@
 #include "VoxelWorldSettings.generated.h"
 
 class UVoxelBiomeDefinition;
+class UVoxelWorldDefinition;
 class UMaterialInterface;
 
-UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "Voxel World (Temporary Defaults)"))
+UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "Voxel World"))
 class VOXELWORLD_API UVoxelWorldSettings : public UDeveloperSettings
 {
 	GENERATED_BODY()
 
 public:
 	virtual FName GetCategoryName() const override { return TEXT("Plugins"); }
-	/** Passed to FVoxelGenerationPipeline for every chunk this subsystem requests. */
+
+	/** Optional primary world definition asset. If assigned, its seed, generation settings, biomes, presets, and materials take precedence over the fallback defaults below. */
 	UPROPERTY(EditAnywhere, Config, Category = "World")
+	TSoftObjectPtr<UVoxelWorldDefinition> DefaultWorldDefinition;
+
+	/** Fallback world seed passed to generation when no WorldDefinition is assigned. */
+	UPROPERTY(EditAnywhere, Config, Category = "World|Fallbacks")
 	int32 WorldSeed = 1234;
+
 
 	/** Passed as AvailableBiomes to generation. Empty = TerrainPass's flat fallback layering. Resolved and precached once at subsystem Initialize. */
 	UPROPERTY(EditAnywhere, Config, Category = "World")
