@@ -182,23 +182,23 @@ public:
 	bool IsCpuOnlyMode() const { return bCpuOnlyMode; }
 
 	/** Unloads all active chunks and cancels in-flight jobs. */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|World")
+	UFUNCTION(BlueprintCallable, Category = "Voxel|World", meta = (ToolTip = "Immediately unloads all generated chunks and cancels any pending generation jobs. Use this when resetting the world or before loading a new save."))
 	void ClearAllChunks();
 
 	/** Applies world definition asset (seed, scale, biomes, materials, generation, presets). */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|World")
+	UFUNCTION(BlueprintCallable, Category = "Voxel|World", meta = (ToolTip = "Sets the master world configuration asset. This defines the seed, scale, biomes, and rules for how the world is generated.\n\nInWorldDefinition: The UVoxelWorldDefinition data asset to apply."))
 	void ApplyWorldDefinition(const UVoxelWorldDefinition* InWorldDefinition);
 
-	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	UFUNCTION(BlueprintPure, Category = "Voxel|World", meta = (ToolTip = "Returns the number of voxels along one edge of a chunk (e.g., 32). This dictates how large chunks are in blocks."))
 	int32 GetChunkSize() const { return ChunkSize; }
 
-	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	UFUNCTION(BlueprintPure, Category = "Voxel|World", meta = (ToolTip = "Returns the random seed currently used for world generation."))
 	int32 GetWorldSeed() const { return WorldSeed; }
 
-	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	UFUNCTION(BlueprintPure, Category = "Voxel|World", meta = (ToolTip = "Returns the visual scaling factor of a single voxel in Unreal units (cm)."))
 	float GetVoxelWorldSize() const { return VoxelWorldSize; }
 
-	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	UFUNCTION(BlueprintPure, Category = "Voxel|World", meta = (ToolTip = "Checks if the Voxel World is successfully initialized and ready to process chunk requests. Returns true if ready."))
 	bool IsWorldInitialized() const { return ChunkStore.IsValid(); }
 
 	/**
@@ -206,7 +206,7 @@ public:
 	 * Returns true if the chunk containing this position is resident, false otherwise.
 	 * Will NOT trigger chunk generation or loading.
 	 */
-	UFUNCTION(BlueprintPure, Category = "Voxel|Query")
+	UFUNCTION(BlueprintPure, Category = "Voxel|Query", meta = (ToolTip = "Gets the block ID at a specific world location. Will NOT trigger chunk generation or loading.\n\nWorldPosition: The 3D location in Unreal units (cm). Get this from GetActorLocation.\nOutBlockId: Outputs the integer ID of the block found.\nReturns: True if the chunk at this location is loaded, false if it is not loaded yet (in which case OutBlockId is invalid)."))
 	bool TryGetBlockAtWorldPosition(const FVector& WorldPosition, int32& OutBlockId) const;
 
 	/**
@@ -214,25 +214,25 @@ public:
 	 * Returns true if the chunk containing this position is resident, false otherwise.
 	 * Will NOT trigger chunk generation or loading.
 	 */
-	UFUNCTION(BlueprintPure, Category = "Voxel|Query")
+	UFUNCTION(BlueprintPure, Category = "Voxel|Query", meta = (ToolTip = "Checks if the block at a specific world location is solid (has collision/geometry). Will NOT trigger chunk generation or loading.\n\nWorldPosition: The 3D location in Unreal units (cm). Get this from GetActorLocation.\nbOutIsSolid: Outputs true if the block is solid, false if it is empty space.\nReturns: True if the chunk at this location is loaded, false if it is not loaded yet."))
 	bool TryIsSolidAtWorldPosition(const FVector& WorldPosition, bool& bOutIsSolid) const;
 
 	/** Converts world coordinates to integer chunk coordinates. */
-	UFUNCTION(BlueprintPure, Category = "Voxel|Query")
+	UFUNCTION(BlueprintPure, Category = "Voxel|Query", meta = (ToolTip = "Converts an exact 3D world position into the coordinates of the chunk containing it.\n\nWorldPosition: The actor's world location in Unreal units (cm). Get this from GetActorLocation.\nReturns: The integer chunk coordinate that contains the given world position."))
 	FIntVector WorldPositionToChunkCoordinate(const FVector& WorldPosition) const;
 
 	/** Returns true if the specified chunk coordinate has completed generation and is resident. */
-	UFUNCTION(BlueprintPure, Category = "Voxel|Chunk")
+	UFUNCTION(BlueprintPure, Category = "Voxel|Chunk", meta = (ToolTip = "Checks if a specific chunk has finished generating and its geometry is loaded in the world.\n\nChunkCoord: The 3D integer coordinates of the chunk.\nReturns: True if fully loaded and resident."))
 	bool IsChunkLoaded(const FIntVector& ChunkCoord) const;
 
 	/** Returns true if the specified chunk coordinate has active collision ready. */
-	UFUNCTION(BlueprintPure, Category = "Voxel|Chunk")
+	UFUNCTION(BlueprintPure, Category = "Voxel|Chunk", meta = (ToolTip = "Checks if a specific chunk has finished generating its physics collision data.\n\nChunkCoord: The 3D integer coordinates of the chunk.\nReturns: True if collision is active and entities can walk on it."))
 	bool IsChunkCollisionReady(const FIntVector& ChunkCoord) const;
 
-	UFUNCTION(BlueprintPure, Category = "Voxel|Chunk")
+	UFUNCTION(BlueprintPure, Category = "Voxel|Chunk", meta = (ToolTip = "Returns the total number of chunks that have finished generating and are currently loaded into memory."))
 	int32 GetReadyChunkCount() const { return ReadyCoordinates.Num(); }
 
-	UFUNCTION(BlueprintPure, Category = "Voxel|Chunk")
+	UFUNCTION(BlueprintPure, Category = "Voxel|Chunk", meta = (ToolTip = "Returns the total number of chunks that are currently being tracked, including those actively generating or already loaded."))
 	int32 GetRequestedChunkCount() const { return RequestedCoordinates.Num(); }
 
 	int32 GetFinalizationQueueDepth() const { return FinalizationQueueDepth; }
