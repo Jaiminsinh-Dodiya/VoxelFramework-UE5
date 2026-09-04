@@ -2,6 +2,8 @@
 
 #include "VoxelWorldSubsystem.h"
 #include "VoxelWorldSettings.h"
+#include "VoxelWorldDefinition.h"
+#include "VoxelGenerationDefinition.h"
 #include "AVoxelWorldRenderActor.h"
 #include "VoxelChunk.h"
 #include "VoxelBlockRegistry.h"
@@ -28,12 +30,10 @@ void UVoxelWorldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	const UVoxelRuntimeSettings* RuntimeSettings = GetDefault<UVoxelRuntimeSettings>();
 	ChunkSize = RuntimeSettings->ChunkSize;
 	RenderSubmissionBudgetMs = RuntimeSettings->RenderSubmissionBudgetMs;
-
-	const UVoxelWorldSettings* WorldSettings = GetDefault<UVoxelWorldSettings>();
-	WorldSeed = WorldSettings->WorldSeed;
-	VoxelWorldSize = WorldSettings->VoxelWorldSize;
+	MaxComponentPoolSize = RuntimeSettings->MaxComponentPoolSize;
 
 	ChunkStore = MakeUnique<FVoxelChunkStore>(ChunkSize);
+
 
 	BlockRegistry = GetWorld()->GetSubsystem<UVoxelBlockRegistry>();
 	if (!BlockRegistry)
@@ -41,35 +41,47 @@ void UVoxelWorldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		UE_LOG(LogVoxelWorld, Warning, TEXT("No UVoxelBlockRegistry available for this world - biome terrain layers will fall back to TerrainPass's flat default layering."));
 	}
 
-	// Resolve biome soft pointers ONCE here (Game Thread, Initialize is
-	// guaranteed Game-Thread-only) rather than per chunk request.
-	for (const TSoftObjectPtr<UVoxelBiomeDefinition>& SoftBiome : WorldSettings->DefaultBiomes)
+	const UVoxelWorldSettings* WorldSettings = GetDefault<UVoxelWorldSettings>();
+	if (const UVoxelWorldDefinition* DefaultWorldDef = WorldSettings->DefaultWorldDefinition.LoadSynchronous())
 	{
-		if (UVoxelBiomeDefinition* Biome = SoftBiome.LoadSynchronous())
-		{
-			ResolvedBiomes.Add(Biome);
-			AvailableBiomes.Add(Biome);
-		}
+		ApplyWorldDefinition(DefaultWorldDef);
 	}
+	else
+	{
+		WorldSeed = WorldSettings->WorldSeed;
+		VoxelWorldSize = WorldSettings->VoxelWorldSize;
 
-	if (BlockRegistry && ResolvedBiomes.Num() > 0)
-	{
-		BlockRegistry->PrecacheBiomeLayers(ResolvedBiomes);
-	}
-	for (const TPair<int32, TSoftObjectPtr<UMaterialInterface>>& Pair : WorldSettings->BlockMaterials)
-	{
-		if (UMaterialInterface* Material = Pair.Value.LoadSynchronous())
+		// Resolve biome soft pointers ONCE here (Game Thread, Initialize is
+		// guaranteed Game-Thread-only) rather than per chunk request.
+		for (const TSoftObjectPtr<UVoxelBiomeDefinition>& SoftBiome : WorldSettings->DefaultBiomes)
 		{
-			ResolvedBlockMaterials.Add(Pair.Key, Material);
+			if (UVoxelBiomeDefinition* Biome = SoftBiome.LoadSynchronous())
+			{
+				ResolvedBiomes.Add(Biome);
+				AvailableBiomes.Add(Biome);
+			}
 		}
+
+		if (BlockRegistry && ResolvedBiomes.Num() > 0)
+		{
+			BlockRegistry->PrecacheBiomeLayers(ResolvedBiomes);
+		}
+		for (const TPair<int32, TSoftObjectPtr<UMaterialInterface>>& Pair : WorldSettings->BlockMaterials)
+		{
+			if (UMaterialInterface* Material = Pair.Value.LoadSynchronous())
+			{
+				ResolvedBlockMaterials.Add(Pair.Key, Material);
+			}
+		}
+		ResolvedDefaultMaterial = WorldSettings->DefaultMaterial.LoadSynchronous();
 	}
-	ResolvedDefaultMaterial = WorldSettings->DefaultMaterial.LoadSynchronous();
 
 	GenerationPipeline = MakeShared<FVoxelGenerationPipeline>();
 
 	UE_LOG(LogVoxelWorld, Log, TEXT("Initialized: ChunkSize=%d WorldSeed=%d Biomes=%d RenderBudget=%.1fms"),
 		ChunkSize, WorldSeed, ResolvedBiomes.Num(), RenderSubmissionBudgetMs);
 }
+
 
 void UVoxelWorldSubsystem::Deinitialize()
 {
@@ -469,6 +481,7 @@ FVoxelChunkHandle UVoxelWorldSubsystem::RequestChunk(const FVoxelChunkCoordinate
 	const int32 CapturedChunkSize = ChunkSize;
 	const UVoxelBlockRegistry* CapturedRegistry = BlockRegistry;
 	const float CapturedVoxelWorldSize = VoxelWorldSize;
+	const FVoxelGenerationConfig CapturedConfig = GenerationConfig;
 	TArray<const UVoxelBiomeDefinition*> CapturedBiomes = AvailableBiomes;
 	TSharedPtr<FVoxelGenerationPipeline> CapturedPipeline = GenerationPipeline;
 	TWeakObjectPtr<UVoxelWorldSubsystem> WeakThis(this);
@@ -478,7 +491,7 @@ FVoxelChunkHandle UVoxelWorldSubsystem::RequestChunk(const FVoxelChunkCoordinate
 	InFlightCancelFlags.Add(Coordinate, CancelFlag);
 
 	const FVoxelJobHandle JobHandle = FVoxelRuntimeModule::Get().GetScheduler().Submit(
-		[Chunk, CapturedPipeline, CapturedSeed, Coordinate, CapturedChunkSize, CapturedRegistry, CapturedBiomes, Neighbors, CapturedVoxelWorldSize, MeshDataResult, CancelFlag]()
+		[Chunk, CapturedPipeline, CapturedSeed, Coordinate, CapturedChunkSize, CapturedRegistry, CapturedBiomes, Neighbors, CapturedVoxelWorldSize, CapturedConfig, MeshDataResult, CancelFlag]()
 		{
 			if (CancelFlag->Load())
 			{
@@ -489,9 +502,10 @@ FVoxelChunkHandle UVoxelWorldSubsystem::RequestChunk(const FVoxelChunkCoordinate
 				TRACE_CPUPROFILER_EVENT_SCOPE(Voxel_WorkerGenerate);
 				if (CapturedPipeline)
 				{
-					CapturedPipeline->GenerateChunk(CapturedSeed, Coordinate, CapturedChunkSize, CapturedRegistry, CapturedBiomes, *Chunk);
+					CapturedPipeline->GenerateChunk(CapturedSeed, Coordinate, CapturedChunkSize, CapturedRegistry, CapturedBiomes, *Chunk, &CapturedConfig);
 				}
 			}
+
 
 			if (CancelFlag->Load())
 			{
@@ -1078,3 +1092,127 @@ void UVoxelWorldSubsystem::SetChunkVisible(const FVoxelChunkCoordinate& Coordina
 		}
 	}
 }
+
+void UVoxelWorldSubsystem::ApplyWorldDefinition(const UVoxelWorldDefinition* InWorldDefinition)
+{
+	if (!InWorldDefinition)
+	{
+		return;
+	}
+
+	WorldSeed = InWorldDefinition->WorldSeed;
+	VoxelWorldSize = InWorldDefinition->VoxelWorldSize;
+
+	if (const UVoxelGenerationDefinition* GenDef = InWorldDefinition->GenerationDefinition.LoadSynchronous())
+	{
+		GenerationConfig = GenDef->ToRuntimeConfig(BlockRegistry);
+	}
+
+	ResolvedBiomes.Reset();
+	AvailableBiomes.Reset();
+	for (const TSoftObjectPtr<UVoxelBiomeDefinition>& SoftBiome : InWorldDefinition->Biomes)
+	{
+		if (UVoxelBiomeDefinition* Biome = SoftBiome.LoadSynchronous())
+		{
+			ResolvedBiomes.Add(Biome);
+			AvailableBiomes.Add(Biome);
+		}
+	}
+
+	if (BlockRegistry && ResolvedBiomes.Num() > 0)
+	{
+		BlockRegistry->PrecacheBiomeLayers(ResolvedBiomes);
+	}
+
+	ResolvedBlockMaterials.Reset();
+	for (const TPair<int32, TSoftObjectPtr<UMaterialInterface>>& Pair : InWorldDefinition->BlockMaterials)
+	{
+		if (UMaterialInterface* Material = Pair.Value.LoadSynchronous())
+		{
+			ResolvedBlockMaterials.Add(Pair.Key, Material);
+		}
+	}
+	ResolvedDefaultMaterial = InWorldDefinition->DefaultMaterial.LoadSynchronous();
+}
+
+bool UVoxelWorldSubsystem::TryGetBlockAtWorldPosition(const FVector& WorldPosition, int32& OutBlockId) const
+{
+	OutBlockId = 0;
+	if (!ChunkStore.IsValid() || VoxelWorldSize <= 0.0f || ChunkSize <= 0)
+	{
+		return false;
+	}
+
+	const float ChunkWorldSpan = ChunkSize * VoxelWorldSize;
+	const int32 ChunkX = FMath::FloorToInt(WorldPosition.X / ChunkWorldSpan);
+	const int32 ChunkY = FMath::FloorToInt(WorldPosition.Y / ChunkWorldSpan);
+	const int32 ChunkZ = FMath::FloorToInt(WorldPosition.Z / ChunkWorldSpan);
+
+	const FVoxelChunkCoordinate Coord(ChunkX, ChunkY, ChunkZ);
+	const FVoxelChunk* Chunk = FindChunk(Coord);
+	if (!Chunk)
+	{
+		return false;
+	}
+
+	const float LocalWorldX = WorldPosition.X - (ChunkX * ChunkWorldSpan);
+	const float LocalWorldY = WorldPosition.Y - (ChunkY * ChunkWorldSpan);
+	const float LocalWorldZ = WorldPosition.Z - (ChunkZ * ChunkWorldSpan);
+
+	const int32 LocalX = FMath::Clamp(FMath::FloorToInt(LocalWorldX / VoxelWorldSize), 0, ChunkSize - 1);
+	const int32 LocalY = FMath::Clamp(FMath::FloorToInt(LocalWorldY / VoxelWorldSize), 0, ChunkSize - 1);
+	const int32 LocalZ = FMath::Clamp(FMath::FloorToInt(LocalWorldZ / VoxelWorldSize), 0, ChunkSize - 1);
+
+	OutBlockId = static_cast<int32>(Chunk->GetBlock(LocalX, LocalY, LocalZ));
+	return true;
+}
+
+bool UVoxelWorldSubsystem::TryIsSolidAtWorldPosition(const FVector& WorldPosition, bool& bOutIsSolid) const
+{
+	bOutIsSolid = false;
+	int32 BlockId = 0;
+	if (!TryGetBlockAtWorldPosition(WorldPosition, BlockId))
+	{
+		return false;
+	}
+
+	if (BlockId == 0) // Air
+	{
+		bOutIsSolid = false;
+		return true;
+	}
+
+	if (BlockRegistry)
+	{
+		bOutIsSolid = BlockRegistry->IsSolid(static_cast<FVoxelBlockId>(BlockId));
+	}
+	else
+	{
+		bOutIsSolid = (BlockId != 0);
+	}
+	return true;
+}
+
+FIntVector UVoxelWorldSubsystem::WorldPositionToChunkCoordinate(const FVector& WorldPosition) const
+{
+	if (VoxelWorldSize <= 0.0f || ChunkSize <= 0)
+	{
+		return FIntVector::ZeroValue;
+	}
+	const float ChunkWorldSpan = ChunkSize * VoxelWorldSize;
+	return FIntVector(
+		FMath::FloorToInt(WorldPosition.X / ChunkWorldSpan),
+		FMath::FloorToInt(WorldPosition.Y / ChunkWorldSpan),
+		FMath::FloorToInt(WorldPosition.Z / ChunkWorldSpan));
+}
+
+bool UVoxelWorldSubsystem::IsChunkLoaded(const FIntVector& ChunkCoord) const
+{
+	return IsChunkReady(FVoxelChunkCoordinate(ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z));
+}
+
+bool UVoxelWorldSubsystem::IsChunkCollisionReady(const FIntVector& ChunkCoord) const
+{
+	return HasChunkCollision(FVoxelChunkCoordinate(ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z));
+}
+

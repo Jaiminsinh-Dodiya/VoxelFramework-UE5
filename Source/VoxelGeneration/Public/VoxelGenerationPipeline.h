@@ -46,8 +46,10 @@ public:
 		int32 ChunkSize,
 		const UVoxelBlockRegistry* BlockRegistry,
 		const TArray<const UVoxelBiomeDefinition*>& AvailableBiomes,
-		FVoxelChunk& OutChunk) const;
+		FVoxelChunk& OutChunk,
+		const FVoxelGenerationConfig* GenerationConfig = nullptr) const;
 
 private:
 	TArray<TUniquePtr<IVoxelGenerationPass>> Passes;
 };
+

@@ -31,6 +31,12 @@ This document provides a comprehensive reference for the Voxel Framework API, or
 ### FVoxelJobHandle
 - `JobId`: `uint32`
 
+### FVoxelGenerationConfig (Plain Runtime Structs)
+- `FVoxelClimateConfig`: `Frequency` (float), `TemperatureSeedOffset` (int32), `HumiditySeedOffset` (int32)
+- `FVoxelTerrainConfig`: `BaseHeight` (int32), `HeightAmplitude` (float), `BaseFrequency` (float), `NoiseOctaves` (int32), `Lacunarity` (float), `Persistence` (float), fallback block IDs/depths
+- `FVoxelCaveConfig`: `bEnabled` (bool), `CarveThreshold` (float), `DensityFrequency` (float), `NoiseOctaves` (int32), `SurfaceProtectionDepth` (int32), `CaveSeedOffset` (int32), `Lacunarity` (float), `Persistence` (float)
+- `FVoxelGenerationConfig`: Composite struct containing `Climate`, `Terrain`, and `Caves` configs. Passed to worker threads.
+
 ## VoxelRuntime
 
 ### FVoxelRuntimeModule
@@ -61,6 +67,7 @@ This document provides a comprehensive reference for the Voxel Framework API, or
 | StreamingBudgetMs | float | 1.5 | |
 | RenderSubmissionBudgetMs | float | 1.0 | |
 | MemoryBudgetMB | int32 | 256 | |
+| MaxComponentPoolSize | int32 | 128 | Pool capacity for recycled mesh components |
 
 ## VoxelMath
 
@@ -71,6 +78,40 @@ This document provides a comprehensive reference for the Voxel Framework API, or
 - `FBM3D(...)`
 
 ## VoxelAssets
+
+### UVoxelWorldDefinition (UDataAsset)
+Top-level world composition asset.
+| Property | Type | Default | Notes |
+|---|---|---|---|
+| WorldSeed | int32 | 1234 | World seed |
+| VoxelWorldSize | float | 100.0 | World-space size of one voxel (cm) |
+| GenerationDefinition | TSoftObjectPtr<UVoxelGenerationDefinition> | null | Generation parameters asset |
+| Biomes | TArray<TSoftObjectPtr<UVoxelBiomeDefinition>> | empty | Biome definitions |
+| StreamingPreset | TSoftObjectPtr<UVoxelStreamingPreset> | null | Streaming distances & budgets |
+| PhysicsPreset | TSoftObjectPtr<UDataAsset> | null | Reference to UVoxelPhysicsPreset |
+| BlockMaterials | TMap<int32, TSoftObjectPtr<UMaterialInterface>> | empty | Material overrides per block ID |
+| DefaultMaterial | TSoftObjectPtr<UMaterialInterface> | null | Fallback material |
+
+### UVoxelGenerationDefinition (UDataAsset)
+Designer-facing generation parameter container.
+- `Climate`: `FVoxelClimateSettings` (Frequency, TemperatureSeedOffset, HumiditySeedOffset)
+- `Terrain`: `FVoxelTerrainSettings` (BaseHeight, HeightAmplitude, BaseFrequency, NoiseOctaves, Lacunarity, Persistence, fallback block soft pointers)
+- `Caves`: `FVoxelCaveSettings` (bEnabled, CarveThreshold, DensityFrequency, NoiseOctaves, SurfaceProtectionDepth, CaveSeedOffset, Lacunarity, Persistence)
+- `ToRuntimeConfig(const UVoxelBlockRegistry* Registry) const -> FVoxelGenerationConfig`
+
+### UVoxelStreamingPreset (UDataAsset)
+- `SimulationDistance` (int32, default 4)
+- `RenderDistance` (int32, default 8)
+- `GenerationDistance` (int32, default 10)
+- `PersistenceDistance` (int32, default 12)
+- `StreamingBudgetMs` (float, default 1.5)
+
+### UVoxelConfigValidator (UObject)
+Blueprint function library for configuration asset validation.
+- `ValidateWorldDefinition(WorldDef, ChunkSize, WorldHeight) -> TArray<FVoxelValidationMessage>`
+- `ValidateGenerationDefinition(GenDef, ChunkSize, WorldHeight) -> TArray<FVoxelValidationMessage>`
+- `ValidateBlockDefinitions(BlockDefs) -> TArray<FVoxelValidationMessage>`
+- `ValidateBiomeDefinition(BiomeDef) -> TArray<FVoxelValidationMessage>`
 
 ### UVoxelBlockDefinition
 | Property | Type | Notes |
@@ -105,6 +146,7 @@ This document provides a comprehensive reference for the Voxel Framework API, or
 - `IsSolid(FVoxelBlockId)`
 - `PrecacheBiomeLayers()`
 - `GetResolvedLayerBlockIds()`
+
 
 ## VoxelStorage
 
@@ -265,6 +307,16 @@ Parent: `UPrimitiveComponent`, `IInterface_CollisionDataProvider`, ClassGroup=`V
 - `HasActiveCollision() const -> bool`
 - `GetCurrentCollisionRevision() const -> uint32`
 
+Header: `VoxelPhysicsPreset.h`
+
+### UVoxelPhysicsPreset (UDataAsset)
+Domain-specific collision preset.
+| Property | Type | Default | Notes |
+|---|---|---|---|
+| CollisionMode | EVoxelCollisionMode | EVoxelCollisionMode::Complex | Collision fidelity |
+| bAsyncCooking | bool | true | Asynchronous Chaos cooking off GT |
+| CollisionProfileName | FName | "BlockAll" | Collision profile |
+
 ## VoxelWorld
 
 Header: `VoxelWorldSubsystem.h`
@@ -325,8 +377,29 @@ void SetCpuOnlyMode(bool bInCpuOnly);
 void ClearAllChunks();
 // Unloads all active chunks and cancels in-flight jobs.
 
+void ApplyWorldDefinition(const UVoxelWorldDefinition* InWorldDefinition);
+// Loads and applies runtime configuration from a UVoxelWorldDefinition asset.
+
+// --- Blueprint Query APIs ---
+bool TryGetBlockAtWorldPosition(const FVector& WorldPosition, int32& OutBlockId) const;
+// Returns true and populates OutBlockId if the containing chunk is loaded and resident.
+
+bool TryIsSolidAtWorldPosition(const FVector& WorldPosition, bool& bOutIsSolid) const;
+// Returns true and populates bOutIsSolid if the containing chunk is loaded and resident.
+
+FIntVector WorldPositionToChunkCoordinate(const FVector& WorldPosition) const;
+// Converts continuous world position (cm) to integer chunk coordinate.
+
+bool IsChunkLoaded(const FIntVector& ChunkCoord) const;
+// Returns true if chunk is ready in memory.
+
+bool IsChunkCollisionReady(const FIntVector& ChunkCoord) const;
+// Returns true if chunk has active Chaos collision geometry.
+
 int32 GetChunkSize() const;
 int32 GetWorldSeed() const;
+float GetVoxelWorldSize() const;
+bool IsWorldInitialized() const;
 int32 GetReadyChunkCount() const;
 int32 GetRequestedChunkCount() const;
 int32 GetFinalizationQueueDepth() const;
@@ -356,8 +429,9 @@ UDeveloperSettings, Project Settings → Plugins → Voxel World
 
 | Property | Type | Default | Notes |
 |---|---|---|---|
-| WorldSeed | int32 | 1234 | Passed to generation pipeline |
-| DefaultBiomes | TArray<TSoftObjectPtr<UVoxelBiomeDefinition>> | empty | Resolved at subsystem init |
+| DefaultWorldDefinition | TSoftObjectPtr<UVoxelWorldDefinition> | null | Primary data-driven world definition |
+| WorldSeed | int32 | 1234 | Fallback world seed if no WorldDefinition set |
+| DefaultBiomes | TArray<TSoftObjectPtr<UVoxelBiomeDefinition>> | empty | Fallback biomes |
 | VoxelWorldSize | float | 100.0 | World-space size of one voxel |
 | BlockMaterials | TMap<int32, TSoftObjectPtr<UMaterialInterface>> | empty | Per-block material overrides |
 | DefaultMaterial | TSoftObjectPtr<UMaterialInterface> | unset | Fallback material |
@@ -389,7 +463,7 @@ Header: `VoxelStreamingManager.h`
 Parent: `UTickableWorldSubsystem`
 Tick-driven streaming manager that decides which chunks to load, unload, and render based on viewer position and runtime distance bands.
 
-#### Public methods:
+#### Public & Blueprint APIs:
 ```cpp
 void SetViewerPosition(const FVector& WorldPosition); // Pass FLT_MAX to restore auto-tracking
 int32 GetManagedChunkCount() const;
@@ -398,28 +472,35 @@ int32 GetPendingRequestCount() const;
 int32 GetPendingUnloadCount() const;
 float GetLastTickBudgetUsedMs() const;
 
-void SetStreamingFrozen(bool bFrozen); // Freezes streaming updates (Mode D)
-bool IsStreamingFrozen() const;
-void ForceReevaluateQueue();
-void ClearAllManaged();
+void ApplyPreset(const UVoxelStreamingPreset* Preset); // Applies distance bands and budgets from preset
+
+void SetSimulationDistance(int32 InSimulationDistance);
+int32 GetSimulationDistance() const;
 
 void SetRenderDistance(int32 InRenderDistance);
 int32 GetRenderDistance() const;
-void SetSimulationDistance(int32 InSimulationDistance);
-int32 GetSimulationDistance() const;
+
 void SetGenerationDistance(int32 InGenerationDistance);
 int32 GetGenerationDistance() const;
+
 void SetPersistenceDistance(int32 InPersistenceDistance);
 int32 GetPersistenceDistance() const;
 
-void SetStreamingBudgetMs(float InBudgetMs);
+void SetStreamingBudgetMs(float InStreamingBudgetMs);
 float GetStreamingBudgetMs() const;
+
+void SetStreamingFrozen(bool bFrozen); // Category = "Voxel|Development"
+bool IsStreamingFrozen() const;
+
+void ForceReevaluateQueue();
+void ClearAllManaged();
 
 EVoxelWorkPriority GetPriorityForCoordinate(const FVoxelChunkCoordinate& Coordinate, const FVoxelChunkCoordinate& ViewerChunk) const;
 FORCEINLINE EVoxelWorkPriority GetPriorityForDistance(int32 Dist) const;
 ```
 
 ## VoxelDebug
+
 
 Header: `VoxelDebugVisualizer.h`
 

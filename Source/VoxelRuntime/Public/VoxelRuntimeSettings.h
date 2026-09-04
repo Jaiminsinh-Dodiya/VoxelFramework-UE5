@@ -62,4 +62,9 @@ public:
 	/** Approximate memory budget for resident chunk storage + mesh buffers, in megabytes. */
 	UPROPERTY(EditAnywhere, Config, Category = "Performance", meta = (ClampMin = "16"))
 	int32 MemoryBudgetMB = 256;
+
+	/** Maximum number of recycled UVoxelMeshComponent instances retained in the component pool. */
+	UPROPERTY(EditAnywhere, Config, Category = "Performance", meta = (ClampMin = "0"))
+	int32 MaxComponentPoolSize = 128;
 };
+

@@ -1,6 +1,7 @@
 // VoxelStreamingManager.cpp
 
 #include "VoxelStreamingManager.h"
+#include "VoxelStreamingPreset.h"
 #include "VoxelStreamingTypes.h"
 #include "VoxelWorldSubsystem.h"
 #include "VoxelRuntimeSettings.h"
@@ -12,6 +13,7 @@
 #include "HAL/PlatformTime.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelStreaming, Log, All);
+
 
 void UVoxelStreamingManager::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -110,6 +112,21 @@ void UVoxelStreamingManager::SetViewerPosition(const FVector& WorldPosition)
 	ManualViewerPosition = WorldPosition;
 	bUseManualViewer = true;
 }
+
+void UVoxelStreamingManager::ApplyPreset(const UVoxelStreamingPreset* Preset)
+{
+	if (!Preset)
+	{
+		return;
+	}
+
+	SetSimulationDistance(Preset->SimulationDistance);
+	SetRenderDistance(Preset->RenderDistance);
+	SetGenerationDistance(Preset->GenerationDistance);
+	SetPersistenceDistance(Preset->PersistenceDistance);
+	SetStreamingBudgetMs(Preset->StreamingBudgetMs);
+}
+
 
 FVector UVoxelStreamingManager::GetAutoViewerPosition() const
 {
@@ -338,6 +355,12 @@ void UVoxelStreamingManager::Tick(float DeltaTime)
 			if (Dist <= RenderDistance)
 			{
 				VisibleCoordinates.Add(Coord);
+			}
+
+			// If within SimulationDistance, request collision immediately (Queued if generation incomplete)
+			if (Dist <= SimulationDistance)
+			{
+				WorldSubsystem->RequestChunkCollision(Coord, EVoxelWorkPriority::Critical);
 			}
 		}
 	}

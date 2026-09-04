@@ -29,6 +29,7 @@
 #include "VoxelStreamingManager.generated.h"
 
 class UVoxelWorldSubsystem;
+class UVoxelStreamingPreset;
 
 UCLASS()
 class VOXELSTREAMING_API UVoxelStreamingManager : public UTickableWorldSubsystem
@@ -41,25 +42,36 @@ public:
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
 
+	/** Applies streaming distance bands and budget parameters from a UVoxelStreamingPreset asset. */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Streaming", meta = (ToolTip = "Applies streaming distance bands and budget parameters from a preset asset."))
+	void ApplyPreset(const UVoxelStreamingPreset* Preset);
+
 	/** Override the auto-tracked viewer position. Pass FLT_MAX to re-enable auto-tracking. */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Streaming", meta = (ToolTip = "Overrides the auto-tracked viewer position. The input is a world-space location (e.g., from GetActorLocation)."))
 	void SetViewerPosition(const FVector& WorldPosition);
 
 	/** Number of chunks currently managed by this streaming manager. */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Streaming", meta = (ToolTip = "Returns the number of chunks currently managed by this streaming manager."))
 	int32 GetManagedChunkCount() const { return ManagedCoordinates.Num(); }
 
 	/** Number of chunks currently visible according to RenderDistance. */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Streaming", meta = (ToolTip = "Returns the number of chunks currently visible according to the Render Distance."))
 	int32 GetVisibleChunkCount() const { return VisibleCoordinates.Num(); }
 
 	/** Number of chunk requests queued waiting for frame budget. */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Streaming", meta = (ToolTip = "Returns the number of chunk loading requests queued up and waiting for frame budget."))
 	int32 GetPendingRequestCount() const { return FMath::Max(0, PendingRequests.Num() - PendingRequestIndex); }
 
 	/** Number of chunk unloads queued waiting for frame budget. */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Streaming", meta = (ToolTip = "Returns the number of chunk unloads queued up and waiting for frame budget."))
 	int32 GetPendingUnloadCount() const { return FMath::Max(0, PendingUnloads.Num() - PendingUnloadIndex); }
 
 	/** Actual time spent executing streaming work during the last Tick, in milliseconds. */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Streaming", meta = (ToolTip = "Returns the actual time spent executing streaming work during the last Tick, in milliseconds."))
 	float GetLastTickBudgetUsedMs() const { return LastTickBudgetUsedMs; }
 
 	/** Freezes dynamic chunk requesting/unloading for steady-state diagnostic benchmarking (Mode D). */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Development", meta = (ToolTip = "Freezes dynamic chunk requesting and unloading for steady-state diagnostic benchmarking."))
 	void SetStreamingFrozen(bool bFrozen)
 	{
 		bStreamingFrozen = bFrozen;
@@ -68,28 +80,47 @@ public:
 			bForceQueueReevaluation = true;
 		}
 	}
+
+	UFUNCTION(BlueprintPure, Category = "Voxel|Development", meta = (ToolTip = "Returns true if the streaming manager is currently frozen and not loading or unloading chunks."))
 	bool IsStreamingFrozen() const { return bStreamingFrozen; }
 
 	/** Forces immediate re-evaluation of desired streaming coordinates on next tick. */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Development", meta = (ToolTip = "Forces immediate re-evaluation of desired streaming coordinates on the next tick."))
 	void ForceReevaluateQueue() { bForceQueueReevaluation = true; }
 
 	/** Clears all managed coordinates (used for baseline Mode A). */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Development", meta = (ToolTip = "Clears all currently managed coordinates, dropping all chunks instantly. Used for testing."))
 	void ClearAllManaged();
 
 	// Runtime Distance Band Controls (Stage D)
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Streaming", meta = (ToolTip = "Sets the maximum visible distance in chunk units (not world units)."))
 	void SetRenderDistance(int32 InRenderDistance);
+
+	UFUNCTION(BlueprintPure, Category = "Voxel|Streaming", meta = (ToolTip = "Gets the current render distance measured in chunk units."))
 	int32 GetRenderDistance() const { return RenderDistance; }
 
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Streaming", meta = (ToolTip = "Sets the distance in chunk units (not world units) where gameplay simulation occurs."))
 	void SetSimulationDistance(int32 InSimulationDistance);
+
+	UFUNCTION(BlueprintPure, Category = "Voxel|Streaming", meta = (ToolTip = "Gets the current simulation distance measured in chunk units."))
 	int32 GetSimulationDistance() const { return SimulationDistance; }
 
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Streaming", meta = (ToolTip = "Sets the distance in chunk units (not world units) where new chunks are generated."))
 	void SetGenerationDistance(int32 InGenerationDistance);
+
+	UFUNCTION(BlueprintPure, Category = "Voxel|Streaming", meta = (ToolTip = "Gets the current generation distance measured in chunk units."))
 	int32 GetGenerationDistance() const { return GenerationDistance; }
 
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Streaming", meta = (ToolTip = "Sets the distance in chunk units (not world units) beyond which chunks are unloaded and destroyed."))
 	void SetPersistenceDistance(int32 InPersistenceDistance);
+
+	UFUNCTION(BlueprintPure, Category = "Voxel|Streaming", meta = (ToolTip = "Gets the current persistence distance measured in chunk units."))
 	int32 GetPersistenceDistance() const { return PersistenceDistance; }
 
+	UFUNCTION(BlueprintCallable, Category = "Voxel|Streaming", meta = (ToolTip = "Sets the maximum time in milliseconds the streaming manager can spend processing per frame."))
 	void SetStreamingBudgetMs(float InBudgetMs);
+
+	UFUNCTION(BlueprintPure, Category = "Voxel|Streaming", meta = (ToolTip = "Gets the current time budget in milliseconds allocated for streaming work per frame."))
 	float GetStreamingBudgetMs() const { return StreamingBudgetMs; }
 
 	/** Maps a chunk coordinate's distance relative to the viewer to an asynchronous scheduler priority. */
@@ -103,6 +134,7 @@ public:
 		if (Dist <= GenerationDistance) return EVoxelWorkPriority::Normal;
 		return EVoxelWorkPriority::Low;
 	}
+
 
 private:
 	FVoxelChunkCoordinate WorldToChunkCoordinate(const FVector& WorldPosition) const;

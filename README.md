@@ -4,7 +4,7 @@ A high-performance, modular, production-ready voxel engine plugin for Unreal Eng
 
 ## Plugin Metadata
 - **Name:** Voxel Framework
-- **Version:** 2.3.0 (Production Runtime with VoxelPhysics V1)
+- **Version:** 2.4.0 (Framework Authoring & Developer UX)
 - **Engine:** Unreal Engine 5.7
 - **Author:** Jaimin
 - **Architecture:** 12 independent, strictly decoupled modules
@@ -13,17 +13,17 @@ A high-performance, modular, production-ready voxel engine plugin for Unreal Eng
 
 | Layer | Status | Description |
 |---|---|---|
-| **VoxelCore** | ✅ Complete | Leaf value types, coordinate math, handles, and job interfaces |
+| **VoxelCore** | ✅ Complete | Leaf value types, coordinate math, handles, worker-safe runtime structs (`FVoxelGenerationConfig`) |
 | **VoxelRuntime** | ✅ Complete | UE::Tasks asynchronous scheduler wrapper with terminal completion & bounded history |
 | **VoxelMath** | ✅ Complete | Deterministic 2D/3D FastNoise SIMD gradient & FBM noise generators |
-| **VoxelAssets** | ✅ Complete | Block definitions, biome layers, and runtime block registry |
+| **VoxelAssets** | ✅ Complete | `UVoxelWorldDefinition`, `UVoxelGenerationDefinition`, `UVoxelStreamingPreset`, `UVoxelConfigValidator` |
 | **VoxelStorage** | ✅ Complete | Compact 16-bit voxel storage, pooled chunk stores, and worker lease lifecycles |
-| **VoxelGeneration** | ✅ Complete | 4-pass reentrant pipeline: Climate → Biome → Terrain → 3D Caves |
+| **VoxelGeneration** | ✅ Complete | 4-pass data-driven pipeline: Climate → Biome → Terrain → 3D Caves (toggleable) |
 | **VoxelMeshing** | ✅ Complete | Greedy mesher + baked AO + 36-byte vertex format + neighbor boundary culling |
 | **VoxelRendering** | ✅ Complete | Custom `UVoxelMeshComponent` & `FVoxelMeshSceneProxy` with $O(1)$ bounds |
-| **VoxelPhysics** | ✅ Complete | Worker collision builder, `UVoxelCollisionComponent`, Chaos async cooking |
-| **VoxelWorld** | ✅ Complete | Async world subsystem, component pooling, neighbor leasing, shutdown barrier |
-| **VoxelStreaming** | ✅ Complete | 4-band distance manager, precomputed offsets, single-pass evaluation, adaptive budget |
+| **VoxelPhysics** | ✅ Complete | Worker collision builder, `UVoxelCollisionComponent`, `UVoxelPhysicsPreset`, Chaos async cooking |
+| **VoxelWorld** | ✅ Complete | Async world subsystem, Blueprint query APIs, component pooling, shutdown barrier |
+| **VoxelStreaming** | ✅ Complete | 4-band distance manager, runtime distance controls, adaptive budget |
 | **VoxelDebug** | ✅ Complete | 5 visual preview modes + 10 Hz real-time performance telemetry HUD |
 | **Serialization** | ⏸️ Decision Checkpoint | Optional terrain diff saving; skipped for v1 if world regenerates deterministically |
 
@@ -65,6 +65,7 @@ graph TD;
     VoxelStreaming --> VoxelCore;
     VoxelStreaming --> VoxelRuntime;
     VoxelStreaming --> VoxelWorld;
+    VoxelStreaming --> VoxelAssets;
     
     VoxelDebug --> VoxelGeneration;
     VoxelDebug --> VoxelMeshing;
@@ -79,27 +80,37 @@ graph TD;
 ## Architectural Highlights & Invariants
 
 1. **Strict Plugin / Game Boundary**: VoxelFramework is a generic, reusable plugin technology. Game-specific storylines, handcrafted landmark reservations, and quests live outside the plugin and consume it.
-2. **Dedicated Physical Collision Architecture (ADR-006)**: Visual geometry (`UVoxelMeshComponent`, up to `RenderDistance=14`) and physical collision geometry (`UVoxelCollisionComponent`, up to `SimulationDistance=4`) are strictly decoupled. Distant chunks render without paying memory or cooking costs for unused physics bodies.
-3. **Immutable Collision Snapshot Model**: Worker threads generate plain CPU-side `FVoxelCollisionData` snapshots under active worker read leases. Unreal's Chaos physics engine cooks triangle collision asynchronously off the Game Thread via `IInterface_CollisionDataProvider`.
-4. **Scheduler Terminal Completion & Bounded History**: Every submitted job has exactly one terminal completion path. `OnComplete` (and external lease cleanup) is guaranteed to execute across all job lifecycles.
-5. **World Shutdown Barrier**: `UVoxelWorldSubsystem::Deinitialize` waits on all in-flight worker tasks (`WaitForAllTasks`) before resetting storage, preventing memory corruption or crashes on shutdown.
-6. **Neighbor Lifetime Safety & Boundary Culling**: Meshing and collision acquire worker leases on all cardinal neighbors and only read `Ready` neighbors (treating unready/generating/unloaded neighbors as air), preventing concurrent read/write and use-after-free.
-7. **Component Pool Stale Protection**: Stale in-flight completions arriving for unloaded chunks are safely discarded and cannot overwrite newly reassigned components.
-8. **Compact 36-Byte Vertices**: `FVoxelMeshVertex` utilizes single-precision `FVector3f`, `FVector2f`, and `FColor` (36 bytes vs 80-byte double-precision legacy), slashing GPU bandwidth and cache footprint by ~55%.
-9. **Precomputed Relative Offsets & Single-Pass Streaming**: `UVoxelStreamingManager` translates pre-sorted relative offsets in $O(N)$ with 0 heap allocations and 0 runtime sorting on chunk crossings, performing unloads, visibility, and collision simulation in a single unified pass.
-10. **Adaptive Streaming Budget**: Automatically scales down streaming slice on warm/hot frames to protect 60/30 FPS frame pacing on mobile hardware.
+2. **Data-Driven Configuration Precedence (ADR-007)**: Strict 4-tier precedence: `Project Settings` → `World Definition` → `Presets` → `Runtime Blueprint Overrides`.
+3. **Worker-Safe Runtime Structs**: All designer-facing UDataAssets (`UVoxelGenerationDefinition`) are translated into plain, immutable C++ structs (`FVoxelGenerationConfig`) at initialization on the Game Thread before worker dispatch, eliminating UObject contention and GC races.
+4. **Dedicated Physical Collision Architecture (ADR-006)**: Visual geometry (`UVoxelMeshComponent`, up to `RenderDistance=14`) and physical collision geometry (`UVoxelCollisionComponent`, up to `SimulationDistance=4`) are strictly decoupled.
+5. **Conservative Blueprint APIs**: Spatial queries (`TryGetBlockAtWorldPosition`, `TryIsSolidAtWorldPosition`) use explicit residency checks (`bool Try...`) and never trigger silent synchronous generation or frame drops.
+6. **Scheduler Terminal Completion & Bounded History**: Every submitted job has exactly one terminal completion path. `OnComplete` (and external lease cleanup) is guaranteed to execute across all job lifecycles.
+7. **World Shutdown Barrier**: `UVoxelWorldSubsystem::Deinitialize` waits on all in-flight worker tasks (`WaitForAllTasks`) before resetting storage.
+8. **Neighbor Lifetime Safety & Boundary Culling**: Meshing and collision acquire worker leases on all cardinal neighbors and only read `Ready` neighbors.
+9. **Compact 36-Byte Vertices**: `FVoxelMeshVertex` utilizes single-precision `FVector3f`, `FVector2f`, and `FColor` (36 bytes vs 80-byte double-precision legacy), slashing GPU bandwidth by ~55%.
+10. **Precomputed Relative Offsets & Single-Pass Streaming**: `UVoxelStreamingManager` translates pre-sorted relative offsets in $O(N)$ with 0 heap allocations and 0 runtime sorting.
 
-## Testing (44 Passing Automation Tests)
+## Testing (55 Passing Automation Tests)
 
-The plugin leverages Unreal's Automation Testing framework with 44 passing tests ensuring complete subsystem integrity:
+The plugin leverages Unreal's Automation Testing framework with 55 passing tests ensuring complete subsystem integrity:
 
 | Suite | Module | Covers |
 |---|---|---|
 | `Voxel.Assets.BiomeLayerResolution` | VoxelAssets | Soft-pointer biome layer resolution & caching |
+| `Voxel.Configuration.BiomeDefinitionValidation` | VoxelAssets | Validation checks for biome terrain layers |
+| `Voxel.Configuration.BlockDefinitionValidation` | VoxelAssets | Duplicate and reserved block ID validation |
+| `Voxel.Configuration.GenerationConfigFromDefinition` | VoxelAssets | DataAsset to plain runtime struct conversion |
+| `Voxel.Configuration.StreamingPresetApply` | VoxelAssets | Streaming preset property values & application |
+| `Voxel.Configuration.ValidationErrors` | VoxelAssets | World definition missing generation asset error check |
+| `Voxel.Configuration.ValidationWarnings` | VoxelAssets | Invalid generation height range warning check |
+| `Voxel.Configuration.WorldDefinitionDefaults` | VoxelAssets | Default seed, scale, and null soft pointer safety |
 | `Voxel.Generation.Cave.AirRatioLogged` | VoxelGeneration | Bounded air carving ratios |
 | `Voxel.Generation.Cave.BoundaryContinuity` | VoxelGeneration | Cross-chunk continuous cave seams (>75% correlation) |
 | `Voxel.Generation.Cave.DeterministicHash` | VoxelGeneration | Hash reproducibility |
 | `Voxel.Generation.Cave.SurfaceProtected` | VoxelGeneration | Prevents cave carving on surface grass layers |
+| `Voxel.Generation.ConfigBaseHeightShift` | VoxelGeneration | Terrain base height shifting verifies solid voxel count |
+| `Voxel.Generation.ConfigCavesToggleable` | VoxelGeneration | Caves disabled toggle (`bEnabled = false`) verification |
+| `Voxel.Generation.ConfigDeterminism` | VoxelGeneration | Generation config + seed determinism |
 | `Voxel.Generation.DeterministicFromSeed` | VoxelGeneration | Seed determinism |
 | `Voxel.Generation.PerfLog` | VoxelGeneration | Pipeline generation timing |
 | `Voxel.Generation.TerrainRespectsBiomeLayers` | VoxelGeneration | Material layering |
@@ -136,6 +147,7 @@ The plugin leverages Unreal's Automation Testing framework with 44 passing tests
 | `Voxel.Streaming.NeighborLifetimeSafety` | VoxelStreaming | Neighbor worker lease retention during unload and delayed recycling |
 | `Voxel.Streaming.SchedulerBoundedHistory` | VoxelStreaming | 2,000-job historical bounded retention |
 | `Voxel.Streaming.SchedulerTerminalCompletion` | VoxelStreaming | Terminal completion on queued, running, duplicate, and post-completion cancellations |
+| `Voxel.Streaming.SpawnChunkCollisionWithoutMovement` | VoxelStreaming | Immediate collision request for initial spawn chunk without requiring movement |
 | `Voxel.Streaming.StateMachineTransitions` | VoxelStreaming | Authoritative chunk state machine |
 | `Voxel.Streaming.StorageWorkerLeaseLifecycle` | VoxelStreaming | Safe async chunk leasing without use-after-free |
 | `Voxel.World.RequestUnloadBookkeeping` | VoxelWorld | Subsystem request/unload idempotency |
@@ -170,6 +182,7 @@ VoxelFramework/
     │   └── Passes/
     ├── VoxelMeshing/
     ├── VoxelRendering/
+    ├── VoxelPhysics/
     ├── VoxelWorld/
     ├── VoxelStreaming/
     └── VoxelDebug/
@@ -177,7 +190,7 @@ VoxelFramework/
 
 ## Roadmap
 
-Storage ✅ → Assets ✅ → Biomes ✅ → Terrain ✅ → Caves ✅ → Meshing ✅ → Rendering ✅ → World Subsystem ✅ → Streaming ✅ → **Release Hardening & Low-Level Runtime Freeze ✅** → Gameplay Systems
+Storage ✅ → Assets ✅ → Biomes ✅ → Terrain ✅ → Caves ✅ → Meshing ✅ → Rendering ✅ → World Subsystem ✅ → Streaming ✅ → VoxelPhysics V1 ✅ → **Framework Authoring & Developer UX ✅** → Gameplay Systems
 
 ## Getting Started
 
@@ -187,11 +200,16 @@ Storage ✅ → Assets ✅ → Biomes ✅ → Terrain ✅ → Caves ✅ → Mesh
 4. Enable the **Voxel Framework** plugin in the editor.
 5. Place an `AVoxelDebugVisualizer` actor in your scene to inspect generation, meshing, or run live benchmarks.
 
-## Configuration
+## Configuration & Authoring
 
-Two Project Settings panels are provided under Plugins:
-1. **Voxel Framework** (`UVoxelRuntimeSettings`): Adjust ChunkSize, WorldHeightInChunks, streaming distances, generation budgets, and memory budgets.
-2. **Voxel World** (`UVoxelWorldSettings`): Define WorldSeed, DefaultBiomes, VoxelWorldSize, BlockMaterials, and DefaultMaterial.
+The framework offers data-driven authoring assets:
+1. **World Definition (`UVoxelWorldDefinition`)**: Primary composite asset referencing generation parameters, biomes, streaming presets, physics presets, and materials.
+2. **Generation Definition (`UVoxelGenerationDefinition`)**: Modular data asset containing `FVoxelClimateSettings`, `FVoxelTerrainSettings`, and `FVoxelCaveSettings`.
+3. **Streaming Preset (`UVoxelStreamingPreset`)**: Tune distance bands (`Simulation`, `Render`, `Generation`, `Persistence`) and frame budgets (`StreamingBudgetMs`).
+4. **Physics Preset (`UVoxelPhysicsPreset`)**: In `VoxelPhysics`, configure collision fidelity and async cooking.
+5. **Config Validator (`UVoxelConfigValidator`)**: Run `UVoxelConfigValidator::ValidateWorldDefinition` in editor utility widgets or scripts to audit configuration integrity before PIE/packaging.
+6. **Project Settings**: Set `DefaultWorldDefinition` in **Project Settings → Plugins → Voxel World**.
 
 ## License
 TBD — Internal Development / Pre-release.
+

@@ -5,6 +5,11 @@
 #include "VoxelChunkStore.h"
 #include "VoxelChunk.h"
 #include "VoxelScheduler.h"
+#include "VoxelStreamingManager.h"
+#include "VoxelWorldSubsystem.h"
+#include "VoxelPhysicsTypes.h"
+#include "Engine/World.h"
+#include "Engine/Engine.h"
 #include "HAL/Event.h"
 #include "HAL/PlatformProcess.h"
 
@@ -316,3 +321,66 @@ bool FVoxelStreamingLongRunStressTest::RunTest(const FString& Parameters)
 
 	return true;
 }
+
+// ============================================================================
+// Test 8: Spawn Chunk Collision Request Without Viewer Movement
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FVoxelStreamingSpawnCollisionRequestTest,
+	"Voxel.Streaming.SpawnChunkCollisionWithoutMovement",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelStreamingSpawnCollisionRequestTest::RunTest(const FString& Parameters)
+{
+	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false);
+	TestNotNull(TEXT("Test world should be created"), World);
+	if (!World)
+	{
+		return false;
+	}
+
+	FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
+	WorldContext.SetCurrentWorld(World);
+	World->InitializeActorsForPlay(FURL());
+
+	UVoxelWorldSubsystem* WorldSubsystem = World->GetSubsystem<UVoxelWorldSubsystem>();
+	UVoxelStreamingManager* StreamingManager = World->GetSubsystem<UVoxelStreamingManager>();
+
+	TestNotNull(TEXT("UVoxelWorldSubsystem should be available"), WorldSubsystem);
+	TestNotNull(TEXT("UVoxelStreamingManager should be available"), StreamingManager);
+
+	if (WorldSubsystem && StreamingManager)
+	{
+		const FVoxelChunkCoordinate SpawnCoord(0, 0, 0);
+		const FVector SpawnLocation(100.0f, 100.0f, 100.0f); // Inside chunk (0,0,0)
+
+		// Set stationary spawn location
+		StreamingManager->SetViewerPosition(SpawnLocation);
+
+		// Execute initial streaming tick (tick 0)
+		StreamingManager->Tick(0.016f);
+
+		// 1. Verify spawn coordinate was discovered and managed
+		TestTrue(TEXT("Spawn coordinate is managed"), StreamingManager->GetManagedChunkCount() > 0);
+
+		// 2. Verify collision was immediately requested for spawn coordinate (state is Queued or higher, NOT NotRequired)
+		const EVoxelCollisionState InitialCollisionState = WorldSubsystem->GetChunkCollisionState(SpawnCoord);
+		TestTrue(TEXT("Collision state is Queued, Building, Cooking, or Ready (not NotRequired)"),
+			InitialCollisionState == EVoxelCollisionState::Queued ||
+			InitialCollisionState == EVoxelCollisionState::Building ||
+			InitialCollisionState == EVoxelCollisionState::Cooking ||
+			InitialCollisionState == EVoxelCollisionState::Ready);
+
+		// 3. Verify stationary viewer on subsequent tick without movement preserves active/queued collision
+		StreamingManager->Tick(0.016f);
+		const EVoxelCollisionState SecondTickCollisionState = WorldSubsystem->GetChunkCollisionState(SpawnCoord);
+		TestTrue(TEXT("Second tick without movement preserves active/queued collision"),
+			SecondTickCollisionState != EVoxelCollisionState::NotRequired);
+	}
+
+	GEngine->DestroyWorldContext(World);
+	World->DestroyWorld(false);
+
+	return true;
+}
+

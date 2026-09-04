@@ -7,20 +7,11 @@
 #include "VoxelBiomeDefinition.h"
 #include "VoxelBlockRegistry.h"
 
-namespace
-{
-	// Fallback block IDs used only when no biome has been assigned to a
-	// column at all (BiomePass found zero AvailableBiomes) - a project can
-	// legitimately choose not to use biomes yet. This is NOT used when a
-	// biome IS assigned; in that case GetResolvedLayerBlockIds is the only
-	// source of truth (see Execute below).
-	constexpr FVoxelBlockId FallbackStoneId = 1;
-	constexpr FVoxelBlockId FallbackDirtId = 2;
-	constexpr FVoxelBlockId FallbackGrassId = 3;
-}
-
 void FTerrainPass::Execute(FVoxelGenerationContext& Context, FVoxelChunk& Chunk)
 {
+	static const FVoxelTerrainConfig DefaultTerrain;
+	const FVoxelTerrainConfig& Terrain = Context.Config ? Context.Config->Terrain : DefaultTerrain;
+
 	const int32 ChunkSize = Context.ChunkSize;
 	const int32 ChunkBaseZ = Context.ChunkCoordinate.Z * ChunkSize;
 
@@ -32,11 +23,13 @@ void FTerrainPass::Execute(FVoxelGenerationContext& Context, FVoxelChunk& Chunk)
 
 			const float NoiseValue = VoxelNoise::FractalBrownianMotion2D(
 				Context.WorldSeed,
-				WorldColumn.X * BaseFrequency,
-				WorldColumn.Y * BaseFrequency,
-				NoiseOctaves);
+				WorldColumn.X * Terrain.BaseFrequency,
+				WorldColumn.Y * Terrain.BaseFrequency,
+				Terrain.NoiseOctaves,
+				Terrain.Lacunarity,
+				Terrain.Persistence);
 
-			const int32 Height = BaseHeight + FMath::RoundToInt(NoiseValue * HeightAmplitude);
+			const int32 Height = Terrain.BaseHeight + FMath::RoundToInt(NoiseValue * Terrain.HeightAmplitude);
 			Context.ColumnAt(LocalX, LocalY).TerrainHeight = Height;
 
 			const UVoxelBiomeDefinition* Biome = Context.ColumnAt(LocalX, LocalY).Biome;
@@ -90,22 +83,22 @@ void FTerrainPass::Execute(FVoxelGenerationContext& Context, FVoxelChunk& Chunk)
 					// (PrecacheBiomeLayers wasn't called for it) - fall back
 					// rather than silently placing air, but log so this
 					// doesn't go unnoticed the way the old placeholder did.
-					BlockId = DepthBelowSurface == 0 ? FallbackGrassId : (DepthBelowSurface <= 4 ? FallbackDirtId : FallbackStoneId);
+					BlockId = DepthBelowSurface == 0 ? Terrain.FallbackGrassId : (DepthBelowSurface <= Terrain.FallbackDirtDepth ? Terrain.FallbackDirtId : Terrain.FallbackStoneId);
 				}
 				else
 				{
 					// No biome assigned at all: simple default layering.
 					if (DepthBelowSurface == 0)
 					{
-						BlockId = FallbackGrassId;
+						BlockId = Terrain.FallbackGrassId;
 					}
-					else if (DepthBelowSurface <= 4)
+					else if (DepthBelowSurface <= Terrain.FallbackDirtDepth)
 					{
-						BlockId = FallbackDirtId;
+						BlockId = Terrain.FallbackDirtId;
 					}
 					else
 					{
-						BlockId = FallbackStoneId;
+						BlockId = Terrain.FallbackStoneId;
 					}
 				}
 
@@ -114,3 +107,4 @@ void FTerrainPass::Execute(FVoxelGenerationContext& Context, FVoxelChunk& Chunk)
 		}
 	}
 }
+
