@@ -25,11 +25,11 @@ struct FVoxelTerrainLayer
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditDefaultsOnly)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain", meta = (ToolTip = "Block definition used for this layer."))
 	TSoftObjectPtr<UVoxelBlockDefinition> Block;
 
 	/** Layer thickness in voxels. Ignored (fills to bedrock) for the last layer in the list. */
-	UPROPERTY(EditDefaultsOnly)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain", meta = (ClampMin = "1", ToolTip = "Thickness of this layer in voxels. The last layer in the list fills downwards to bedrock."))
 	int32 ThicknessVoxels = 1;
 };
 
@@ -39,28 +39,28 @@ class VOXELASSETS_API UVoxelBiomeDefinition : public UDataAsset
 	GENERATED_BODY()
 
 public:
-	UPROPERTY(EditDefaultsOnly, Category = "Biome")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Biome", meta = (ToolTip = "Display name of this biome."))
 	FText DisplayName;
 
 	/** Climate selection range this biome applies to, both in [0,1]. Used by BiomePass to pick a biome per column. */
-	UPROPERTY(EditDefaultsOnly, Category = "Climate", meta = (ClampMin = "0", ClampMax = "1"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Climate", meta = (ClampMin = "0", ClampMax = "1", ToolTip = "Normalized temperature range [0, 1] where this biome appears."))
 	FVector2D TemperatureRange = FVector2D(0.0f, 1.0f);
 
-	UPROPERTY(EditDefaultsOnly, Category = "Climate", meta = (ClampMin = "0", ClampMax = "1"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Climate", meta = (ClampMin = "0", ClampMax = "1", ToolTip = "Normalized humidity range [0, 1] where this biome appears."))
 	FVector2D HumidityRange = FVector2D(0.0f, 1.0f);
 
 	/** Ordered top-down. Last entry fills downward until the next reserved layer/bedrock. */
-	UPROPERTY(EditDefaultsOnly, Category = "Terrain")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain", meta = (ToolTip = "Ordered top-down terrain layers (e.g. Grass -> Dirt -> Stone)."))
 	TArray<FVoxelTerrainLayer> TerrainLayers;
 
-	UPROPERTY(EditDefaultsOnly, Category = "Ambience")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ambience", meta = (ToolTip = "Ambient color tint applied in this biome."))
 	FLinearColor AmbientTint = FLinearColor::White;
 
 	/** Gameplay-facing tags (weather, audio zone, spawn rules) - left generic so gameplay code defines their own meaning. */
-	UPROPERTY(EditDefaultsOnly, Category = "Gameplay")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gameplay", meta = (ToolTip = "Gameplay tags associated with this biome for audio, weather, or spawn rules."))
 	FGameplayTagContainer BiomeTags;
 
 	/** Chance [0,1] per eligible column for VegetationPass to place a vegetation entry from this biome. */
-	UPROPERTY(EditDefaultsOnly, Category = "Vegetation", meta = (ClampMin = "0", ClampMax = "1"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vegetation", meta = (ClampMin = "0", ClampMax = "1", ToolTip = "Vegetation placement density [0, 1]."))
 	float VegetationDensity = 0.1f;
 };

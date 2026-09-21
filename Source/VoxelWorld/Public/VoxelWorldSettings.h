@@ -26,7 +26,7 @@ class UVoxelBiomeDefinition;
 class UVoxelWorldDefinition;
 class UMaterialInterface;
 
-UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "Voxel World"))
+UCLASS(Config = Game, DefaultConfig, BlueprintType, meta = (DisplayName = "Voxel World"))
 class VOXELWORLD_API UVoxelWorldSettings : public UDeveloperSettings
 {
 	GENERATED_BODY()
@@ -35,7 +35,7 @@ public:
 	virtual FName GetCategoryName() const override { return TEXT("Plugins"); }
 
 	/** Optional primary world definition asset. If assigned, its seed, generation settings, biomes, presets, and materials take precedence over the fallback defaults below. */
-	UPROPERTY(EditAnywhere, Config, Category = "World")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Config, Category = "World")
 	TSoftObjectPtr<UVoxelWorldDefinition> DefaultWorldDefinition;
 
 	/** Fallback world seed passed to generation when no WorldDefinition is assigned. */

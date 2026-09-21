@@ -20,7 +20,7 @@
  * Project-wide voxel framework settings.
  * Edit via Project Settings > Plugins > Voxel Framework.
  */
-UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "Voxel Framework"))
+UCLASS(Config = Game, DefaultConfig, BlueprintType, meta = (DisplayName = "Voxel Framework"))
 class VOXELRUNTIME_API UVoxelRuntimeSettings : public UDeveloperSettings
 {
 	GENERATED_BODY()

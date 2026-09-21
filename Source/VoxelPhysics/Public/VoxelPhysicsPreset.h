@@ -19,13 +19,12 @@ class VOXELPHYSICS_API UVoxelPhysicsPreset : public UDataAsset
 	GENERATED_BODY()
 
 public:
-	UPROPERTY(EditDefaultsOnly, Category = "Collision", meta = (ToolTip = "Collision geometry fidelity. 'Complex' generates full triangle mesh collision matching the voxel terrain surface. This is the only mode currently implemented."))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision", meta = (ToolTip = "Collision geometry fidelity. 'Complex' generates full triangle mesh collision matching the voxel terrain surface. This is the only mode currently implemented."))
 	EVoxelCollisionMode CollisionMode = EVoxelCollisionMode::Complex;
 
-	UPROPERTY(EditDefaultsOnly, Category = "Collision", meta = (ToolTip = "If true, collision triangle meshes are cooked asynchronously using Chaos physics (off the Game Thread). Disabling this forces synchronous cooking which will cause frame hitches. Recommended: true."))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision", meta = (ToolTip = "If true, collision triangle meshes are cooked asynchronously using Chaos physics (off the Game Thread). Disabling this forces synchronous cooking which will cause frame hitches. Recommended: true."))
 	bool bAsyncCooking = true;
 
-	UPROPERTY(EditDefaultsOnly, Category = "Collision", meta = (ToolTip = "Unreal collision profile name applied to voxel collision components. Default 'BlockAll' blocks all movement and traces. Use custom profiles for selective channel filtering."))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision", meta = (ToolTip = "Unreal collision profile name applied to voxel collision components. Default 'BlockAll' blocks all movement and traces. Use custom profiles for selective channel filtering."))
 	FName CollisionProfileName = TEXT("BlockAll");
-
 };
