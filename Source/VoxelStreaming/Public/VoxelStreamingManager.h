@@ -140,6 +140,7 @@ private:
 	FVoxelChunkCoordinate WorldToChunkCoordinate(const FVector& WorldPosition) const;
 	FVector GetAutoViewerPosition() const;
 	void RebuildCachedOffsets();
+	void HandleWorldDefinitionApplied(const class UVoxelWorldDefinition* InWorldDefinition);
 
 	UVoxelWorldSubsystem* WorldSubsystem = nullptr;
 	bool bStreamingFrozen = false;

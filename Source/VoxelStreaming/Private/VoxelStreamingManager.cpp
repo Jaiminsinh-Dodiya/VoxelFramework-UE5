@@ -60,10 +60,30 @@ void UVoxelStreamingManager::Initialize(FSubsystemCollectionBase& Collection)
 
 	RebuildCachedOffsets();
 
+	if (WorldSubsystem)
+	{
+		WorldSubsystem->OnWorldDefinitionApplied.AddUObject(this, &UVoxelStreamingManager::HandleWorldDefinitionApplied);
+	}
+
 	UE_LOG(LogVoxelStreaming, Log,
 		TEXT("Initialized: Sim=%d Render=%d Gen=%d Persist=%d Budget=%.1fms Height=%d CachedOffsets=%d"),
 		SimulationDistance, RenderDistance, GenerationDistance, PersistenceDistance,
 		StreamingBudgetMs, WorldHeightInChunks, CachedRelativeOffsets.Num());
+}
+
+void UVoxelStreamingManager::HandleWorldDefinitionApplied(const UVoxelWorldDefinition* InWorldDefinition)
+{
+	if (InWorldDefinition)
+	{
+		VoxelWorldSize = InWorldDefinition->VoxelWorldSize;
+		ChunkWorldEdgeSize = ChunkSize * VoxelWorldSize;
+		InvChunkWorldEdgeSize = (ChunkWorldEdgeSize > 0.0f) ? (1.0f / ChunkWorldEdgeSize) : 0.0f;
+
+		if (const UVoxelStreamingPreset* Preset = InWorldDefinition->StreamingPreset.LoadSynchronous())
+		{
+			ApplyPreset(Preset);
+		}
+	}
 }
 
 void UVoxelStreamingManager::RebuildCachedOffsets()
@@ -99,6 +119,11 @@ void UVoxelStreamingManager::RebuildCachedOffsets()
 
 void UVoxelStreamingManager::Deinitialize()
 {
+	if (WorldSubsystem)
+	{
+		WorldSubsystem->OnWorldDefinitionApplied.RemoveAll(this);
+	}
+
 	ManagedCoordinates.Reset();
 	VisibleCoordinates.Reset();
 	PendingRequests.Reset();
