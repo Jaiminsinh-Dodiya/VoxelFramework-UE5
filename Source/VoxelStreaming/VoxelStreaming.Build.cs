@@ -16,6 +16,7 @@ public class VoxelStreaming : ModuleRules
 			"VoxelAssets",
 			"VoxelStorage",
 			"VoxelWorld",
+			"VoxelPhysics",
 		});
 	}
 }
