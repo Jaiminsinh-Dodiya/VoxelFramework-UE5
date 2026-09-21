@@ -345,7 +345,7 @@ class VoxelBootstrap:
         return world_def
 
     def configure_project_defaults(self, world_def):
-        """Configures UVoxelWorldSettings::DefaultWorldDefinition in Project Settings."""
+        """Configures UVoxelWorldSettings::DefaultWorldDefinition in Project Settings and flushes to config ini."""
         try:
             settings = None
             if hasattr(unreal, "VoxelWorldSettings"):
@@ -353,7 +353,11 @@ class VoxelBootstrap:
             if settings:
                 settings.set_editor_property("default_world_definition", world_def)
                 settings.modify()
-                log_info("Configured Project Settings -> Plugins -> Voxel World -> DefaultWorldDefinition")
+                if hasattr(settings, "try_update_default_config_file"):
+                    settings.try_update_default_config_file()
+                elif hasattr(settings, "save_config"):
+                    settings.save_config()
+                log_info("Configured and persisted Project Settings -> Plugins -> Voxel World -> DefaultWorldDefinition")
                 return True
         except Exception as e:
             log_warning(f"Could not automatically set Project Settings default (optional): {e}")
@@ -437,5 +441,5 @@ def run(overwrite=False, base_path="/Game/VoxelFramework"):
     return bootstrap.execute()
 
 
-# Run automatically when executed as standalone script
-run()
+if __name__ == "__main__":
+    run()
