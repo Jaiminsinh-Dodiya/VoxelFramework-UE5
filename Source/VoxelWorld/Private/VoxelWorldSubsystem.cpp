@@ -15,6 +15,7 @@
 #include "VoxelCollisionComponent.h"
 #include "VoxelCollisionBuilder.h"
 #include "VoxelPhysicsTypes.h"
+#include "VoxelPhysicsPreset.h"
 #include "VoxelRuntimeModule.h"
 #include "VoxelScheduler.h"
 #include "VoxelRuntimeSettings.h"
@@ -296,7 +297,7 @@ void UVoxelWorldSubsystem::FinalizeChunkCollision(FVoxelCompletedCollisionItem&&
 		UVoxelCollisionComponent* Component = GetOrCreateCollisionComponent(Coordinate);
 		Component->OnCollisionCookFinished.RemoveAll(this);
 		Component->OnCollisionCookFinished.AddUObject(this, &UVoxelWorldSubsystem::HandleCollisionCookFinished, Coordinate);
-		Component->SetCollisionData(MoveTemp(Item.CollisionData), /*bAsyncCook=*/ true);
+		Component->SetCollisionData(MoveTemp(Item.CollisionData), bActiveAsyncCooking);
 		CollisionStates.Add(Coordinate, EVoxelCollisionState::Cooking);
 	}
 
@@ -857,6 +858,7 @@ void UVoxelWorldSubsystem::RequestChunkCollision(const FVoxelChunkCoordinate& Co
 
 	const UVoxelBlockRegistry* CapturedRegistry = BlockRegistry;
 	const float CapturedVoxelWorldSize = VoxelWorldSize;
+	const EVoxelCollisionMode CapturedCollisionMode = ActiveCollisionMode;
 	TWeakObjectPtr<UVoxelWorldSubsystem> WeakThis(this);
 
 	TSharedRef<FVoxelCollisionData, ESPMode::ThreadSafe> CollisionDataResult = MakeShared<FVoxelCollisionData, ESPMode::ThreadSafe>();
@@ -864,7 +866,7 @@ void UVoxelWorldSubsystem::RequestChunkCollision(const FVoxelChunkCoordinate& Co
 	InFlightCollisionCancelFlags.Add(Coordinate, CancelFlag);
 
 	const FVoxelJobHandle JobHandle = FVoxelRuntimeModule::Get().GetScheduler().Submit(
-		[Chunk, CapturedRegistry, Neighbors, Coordinate, CapturedVoxelWorldSize, CurrentRevision, CollisionDataResult, CancelFlag]()
+		[Chunk, CapturedRegistry, Neighbors, Coordinate, CapturedVoxelWorldSize, CurrentRevision, CollisionDataResult, CancelFlag, CapturedCollisionMode]()
 		{
 			if (CancelFlag->Load())
 			{
@@ -873,7 +875,7 @@ void UVoxelWorldSubsystem::RequestChunkCollision(const FVoxelChunkCoordinate& Co
 
 			TRACE_CPUPROFILER_EVENT_SCOPE(Voxel_WorkerCollisionBuild);
 			*CollisionDataResult = FVoxelCollisionBuilder::BuildCollisionData(
-				*Chunk, CapturedRegistry, &Neighbors, &Coordinate, CapturedVoxelWorldSize, CurrentRevision, EVoxelCollisionMode::Complex);
+				*Chunk, CapturedRegistry, &Neighbors, &Coordinate, CapturedVoxelWorldSize, CurrentRevision, CapturedCollisionMode);
 		},
 		WorkPriority,
 		[WeakThis, Coordinate, CollisionDataResult, SlotIndex, NeighborSlotIndices = MoveTemp(NeighborSlotIndices), CurrentRevision]() mutable
@@ -952,6 +954,7 @@ UVoxelCollisionComponent* UVoxelWorldSubsystem::GetOrCreateCollisionComponent(co
 	UVoxelCollisionComponent* Component = NewObject<UVoxelCollisionComponent>(RenderHostActor,
 		*FString::Printf(TEXT("ChunkCollision_%d_%d_%d"), Coordinate.X, Coordinate.Y, Coordinate.Z));
 	Component->SetMobility(EComponentMobility::Movable);
+	Component->SetCollisionProfileName(ActiveCollisionProfileName);
 	Component->SetRelativeLocation(FVector::ZeroVector);
 	Component->SetupAttachment(RenderHostActor->GetRootComponent());
 	Component->RegisterComponent();
@@ -1133,6 +1136,31 @@ void UVoxelWorldSubsystem::ApplyWorldDefinition(const UVoxelWorldDefinition* InW
 		}
 	}
 	ResolvedDefaultMaterial = InWorldDefinition->DefaultMaterial.LoadSynchronous();
+
+	if (const UDataAsset* PhysAsset = InWorldDefinition->PhysicsPreset.LoadSynchronous())
+	{
+		if (const UVoxelPhysicsPreset* PhysPreset = Cast<UVoxelPhysicsPreset>(PhysAsset))
+		{
+			SetActivePhysicsConfig(PhysPreset->CollisionMode, PhysPreset->bAsyncCooking, PhysPreset->CollisionProfileName);
+		}
+	}
+
+	OnWorldDefinitionApplied.Broadcast(InWorldDefinition);
+}
+
+void UVoxelWorldSubsystem::SetActivePhysicsConfig(EVoxelCollisionMode InMode, bool bInAsyncCook, FName InProfileName)
+{
+	ActiveCollisionMode = InMode;
+	bActiveAsyncCooking = bInAsyncCook;
+	ActiveCollisionProfileName = InProfileName;
+
+	for (auto& Pair : ChunkCollisionComponents)
+	{
+		if (Pair.Value.IsValid())
+		{
+			Pair.Value.Get()->SetCollisionProfileName(ActiveCollisionProfileName);
+		}
+	}
 }
 
 bool UVoxelWorldSubsystem::TryGetBlockAtWorldPosition(const FVector& WorldPosition, int32& OutBlockId) const

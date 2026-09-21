@@ -235,6 +235,22 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Voxel|Chunk", meta = (ToolTip = "Returns the total number of chunks that are currently being tracked, including those actively generating or already loaded."))
 	int32 GetRequestedChunkCount() const { return RequestedCoordinates.Num(); }
 
+	// Physics Configuration
+	UFUNCTION(BlueprintPure, Category = "Voxel|Physics", meta = (ToolTip = "Returns the active collision mode for terrain chunks."))
+	EVoxelCollisionMode GetActiveCollisionMode() const { return ActiveCollisionMode; }
+
+	UFUNCTION(BlueprintPure, Category = "Voxel|Physics", meta = (ToolTip = "Returns true if Chaos physics collision meshes are cooked asynchronously off the Game Thread."))
+	bool GetActiveAsyncCooking() const { return bActiveAsyncCooking; }
+
+	UFUNCTION(BlueprintPure, Category = "Voxel|Physics", meta = (ToolTip = "Returns the Unreal collision profile name currently applied to voxel collision components."))
+	FName GetActiveCollisionProfileName() const { return ActiveCollisionProfileName; }
+
+	void SetActivePhysicsConfig(EVoxelCollisionMode InMode, bool bInAsyncCook, FName InProfileName);
+
+	/** Fired on Game Thread whenever a UVoxelWorldDefinition is applied. */
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnVoxelWorldDefinitionApplied, const UVoxelWorldDefinition*);
+	FOnVoxelWorldDefinitionApplied OnWorldDefinitionApplied;
+
 	int32 GetFinalizationQueueDepth() const { return FinalizationQueueDepth; }
 	float GetLastFinalizeBudgetUsedMs() const { return LastFinalizeBudgetUsedMs; }
 	int32 GetLastFinalizeCount() const { return LastFinalizeCount; }
@@ -344,6 +360,10 @@ private:
 	float VoxelWorldSize = 100.0f;
 	float RenderSubmissionBudgetMs = 1.0f;
 	FVoxelGenerationConfig GenerationConfig;
+
+	EVoxelCollisionMode ActiveCollisionMode = EVoxelCollisionMode::Complex;
+	bool bActiveAsyncCooking = true;
+	FName ActiveCollisionProfileName = TEXT("BlockAll");
 
 	float LastFinalizeBudgetUsedMs = 0.0f;
 	int32 LastFinalizeCount = 0;
