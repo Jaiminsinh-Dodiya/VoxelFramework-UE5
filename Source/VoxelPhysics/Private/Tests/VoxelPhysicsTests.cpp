@@ -474,7 +474,7 @@ bool FVoxelPhysicsNeighborUnloadDuringCookTest::RunTest(const FString& Parameter
 }
 
 // ============================================================================
-// Test 16: Outward Winding & Normal Direction Verification
+// Test 15: Outward Winding & Normal Direction Verification
 // ============================================================================
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FVoxelPhysicsOutwardWindingNormalsTest,
