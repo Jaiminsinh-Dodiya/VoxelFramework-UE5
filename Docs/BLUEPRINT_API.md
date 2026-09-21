@@ -295,6 +295,44 @@ GetActorLocation → WorldPositionToChunkCoordinate → Print String (Break IntV
 
 ---
 
+### Category: `Voxel|Physics`
+
+#### GetActiveCollisionMode
+| | |
+|---|---|
+| **Node Name** | `Get Active Collision Mode` |
+| **Category** | `Voxel\|Physics` |
+| **Type** | BlueprintPure (value node) |
+| **Input** | *none* |
+| **Output** | `Return Value` — `EVoxelCollisionMode` — `Complex` |
+| **Description** | Returns the collision fidelity mode currently active for generated voxel terrain. |
+
+---
+
+#### GetActiveAsyncCooking
+| | |
+|---|---|
+| **Node Name** | `Get Active Async Cooking` |
+| **Category** | `Voxel\|Physics` |
+| **Type** | BlueprintPure (value node) |
+| **Input** | *none* |
+| **Output** | `Return Value` — `Boolean` — `true` if Chaos physics meshes are cooked asynchronously. |
+| **Description** | Returns true if Chaos collision meshes are cooked on background worker threads (off the Game Thread). |
+
+---
+
+#### GetActiveCollisionProfileName
+| | |
+|---|---|
+| **Node Name** | `Get Active Collision Profile Name` |
+| **Category** | `Voxel\|Physics` |
+| **Type** | BlueprintPure (value node) |
+| **Input** | *none* |
+| **Output** | `Return Value` — `Name` — (e.g. `BlockAll`) |
+| **Description** | Returns the Unreal collision profile name applied to all voxel collision components. |
+
+---
+
 ## 2. UVoxelStreamingManager — Blueprint Functions
 
 Access via: **Get World Subsystem → Voxel Streaming Manager**

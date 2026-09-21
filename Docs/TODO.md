@@ -199,18 +199,20 @@ See [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md) §9 for the current honest li
   - Automatic creation of Blocks (`DA_Block_Stone`, `DA_Block_Dirt`, `DA_Block_Grass`), Biomes (`DA_Biome_Plains` with layered terrain), Sub-Presets (`DA_Generation_Default`, `DA_Streaming_Default`, `DA_Physics_Default`), and Root World Definition (`DA_VoxelWorld_Default`).
   - Automatic reference wiring across the complete asset dependency graph.
   - Automatic setting of `UVoxelWorldSettings::DefaultWorldDefinition` via Python developer settings reflection.
-  - Idempotent script execution model (`CREATE`, `UPDATE`, `SKIP`, `ERROR`).
+  - Non-destructive idempotent execution model with in-place inspection & repair (`setup.run()`, `setup.run(overwrite=True)`).
   - Commandlet & interactive execution verified (`UnrealEditor-Cmd.exe -ExecutePythonScript`).
 - [x] **9.2 Property Specifiers & UStruct Refinements**:
   - Updated configuration properties and USTRUCT members (`FVoxelTerrainLayer`, `FVoxelClimateSettings`, `FVoxelTerrainSettings`, `FVoxelCaveSettings`) to `EditAnywhere, BlueprintReadWrite` for clean editor manipulation and Python reflection.
   - Added `BlueprintType` to `UVoxelWorldSettings` and `UVoxelRuntimeSettings`.
-- [x] **9.3 Subsystem Preset Auto-Application**:
-  - `UVoxelStreamingManager::Initialize` applies `StreamingPreset` from `DefaultWorldDefinition` automatically on startup.
+- [x] **9.3 Runtime Preset Consumption & Subsystem Propagation**:
+  - `UVoxelWorldSubsystem::ApplyWorldDefinition` consumes `UVoxelPhysicsPreset` (propagating `CollisionMode`, `bAsyncCooking`, and `CollisionProfileName` to components and collision builder).
+  - `UVoxelWorldSubsystem::OnWorldDefinitionApplied` broadcasts to `UVoxelStreamingManager` to apply `UVoxelStreamingPreset` without circular module dependencies.
+  - `UVoxelStreamingManager::Initialize` applies `StreamingPreset` from `DefaultWorldDefinition` on startup.
 - [x] **9.4 Authoring & Integration Automation Tests (59/59 Passing — Exit Code: 0)**:
   - `Voxel.Authoring.AssetGraphValidation`
   - `Voxel.Authoring.BlockAndBiomeDefinitions`
-  - `Voxel.Integration.WorldDefinitionApplication`
-  - `Voxel.Integration.ConfigurationPrecedenceCascade`
+  - `Voxel.Integration.WorldDefinitionApplication` (Full authoring, physics preset, and chunk generation determinism)
+  - `Voxel.Integration.ConfigurationPrecedenceCascade` (Full 4-tier cascade verification)
 
 ---
 
