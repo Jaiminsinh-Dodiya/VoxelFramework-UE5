@@ -2,6 +2,7 @@
 
 #include "VoxelStreamingManager.h"
 #include "VoxelStreamingPreset.h"
+#include "VoxelWorldDefinition.h"
 #include "VoxelStreamingTypes.h"
 #include "VoxelWorldSubsystem.h"
 #include "VoxelRuntimeSettings.h"
@@ -40,6 +41,19 @@ void UVoxelStreamingManager::Initialize(FSubsystemCollectionBase& Collection)
 
 	const UVoxelWorldSettings* WorldSettings = GetDefault<UVoxelWorldSettings>();
 	VoxelWorldSize = WorldSettings->VoxelWorldSize;
+
+	// If DefaultWorldDefinition provides a StreamingPreset, apply it
+	if (const UVoxelWorldDefinition* DefaultWorldDef = WorldSettings->DefaultWorldDefinition.LoadSynchronous())
+	{
+		if (const UVoxelStreamingPreset* Preset = DefaultWorldDef->StreamingPreset.LoadSynchronous())
+		{
+			SimulationDistance = Preset->SimulationDistance;
+			RenderDistance = Preset->RenderDistance;
+			GenerationDistance = Preset->GenerationDistance;
+			PersistenceDistance = Preset->PersistenceDistance;
+			StreamingBudgetMs = Preset->StreamingBudgetMs;
+		}
+	}
 
 	ChunkWorldEdgeSize = ChunkSize * VoxelWorldSize;
 	InvChunkWorldEdgeSize = (ChunkWorldEdgeSize > 0.0f) ? (1.0f / ChunkWorldEdgeSize) : 0.0f;
