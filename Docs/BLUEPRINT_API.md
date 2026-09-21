@@ -5,6 +5,20 @@
 
 ---
 
+## Quickstart: Python Bootstrap & Developer Workflow
+
+Get up and running in **under 2 minutes**:
+
+1. Enable the **VoxelFramework** and **Python Editor Script Plugin** plugins.
+2. In the Unreal Editor Output Log (set to **Python**), run:
+   ```python
+   import VoxelFramework.SetupVoxelFramework as setup; setup.run()
+   ```
+   *This automatically generates `/Game/VoxelFramework/` with pre-wired configuration assets (`DA_VoxelWorld_Default`, `DA_Generation_Default`, `DA_Streaming_Default`, `DA_Physics_Default`, Biomes, and Blocks) and sets it as the Project Default World Definition.*
+3. Open a level and use any of the Blueprint nodes below!
+
+---
+
 ## How to Access Voxel Functions in Blueprints
 
 VoxelFramework provides **two ways** to call its functions from Blueprints:

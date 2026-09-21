@@ -192,6 +192,26 @@ See [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md) §9 for the current honest li
   - `Voxel.Generation.ConfigCavesToggleable`
   - `Voxel.Generation.ConfigBaseHeightShift`
 
+## Just completed: Phase 9 — First-Class World Authoring, Blueprint UX & Unreal Python Bootstrap Workflow ✅
+
+- [x] **9.1 Unreal Python Bootstrap Automation (`SetupVoxelFramework.py`)**:
+  - Single-script bootstrap (`Content/Python/VoxelFramework/SetupVoxelFramework.py`) generating project-owned configuration assets under `/Game/VoxelFramework/`.
+  - Automatic creation of Blocks (`DA_Block_Stone`, `DA_Block_Dirt`, `DA_Block_Grass`), Biomes (`DA_Biome_Plains` with layered terrain), Sub-Presets (`DA_Generation_Default`, `DA_Streaming_Default`, `DA_Physics_Default`), and Root World Definition (`DA_VoxelWorld_Default`).
+  - Automatic reference wiring across the complete asset dependency graph.
+  - Automatic setting of `UVoxelWorldSettings::DefaultWorldDefinition` via Python developer settings reflection.
+  - Idempotent script execution model (`CREATE`, `UPDATE`, `SKIP`, `ERROR`).
+  - Commandlet & interactive execution verified (`UnrealEditor-Cmd.exe -ExecutePythonScript`).
+- [x] **9.2 Property Specifiers & UStruct Refinements**:
+  - Updated configuration properties and USTRUCT members (`FVoxelTerrainLayer`, `FVoxelClimateSettings`, `FVoxelTerrainSettings`, `FVoxelCaveSettings`) to `EditAnywhere, BlueprintReadWrite` for clean editor manipulation and Python reflection.
+  - Added `BlueprintType` to `UVoxelWorldSettings` and `UVoxelRuntimeSettings`.
+- [x] **9.3 Subsystem Preset Auto-Application**:
+  - `UVoxelStreamingManager::Initialize` applies `StreamingPreset` from `DefaultWorldDefinition` automatically on startup.
+- [x] **9.4 Authoring & Integration Automation Tests (59/59 Passing — Exit Code: 0)**:
+  - `Voxel.Authoring.AssetGraphValidation`
+  - `Voxel.Authoring.BlockAndBiomeDefinitions`
+  - `Voxel.Integration.WorldDefinitionApplication`
+  - `Voxel.Integration.ConfigurationPrecedenceCascade`
+
 ---
 
 ## 🔒 Low-Level Runtime Freeze & Next Product Phase

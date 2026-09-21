@@ -4,10 +4,32 @@ A high-performance, modular, production-ready voxel engine plugin for Unreal Eng
 
 ## Plugin Metadata
 - **Name:** Voxel Framework
-- **Version:** 2.4.0 (Framework Authoring & Developer UX)
+- **Version:** 2.5.0 (First-Class World Authoring & Unreal Python Bootstrap)
 - **Engine:** Unreal Engine 5.7
 - **Author:** Jaimin
 - **Architecture:** 12 independent, strictly decoupled modules
+
+## 🚀 Getting Started in 5 Minutes (Unreal Python Bootstrap)
+
+VoxelFramework provides a fully automated, idempotent Python bootstrap script to create a complete project-owned voxel world setup in seconds:
+
+1. **Enable Plugin**: In Unreal Editor, navigate to `Edit -> Plugins`, search for `Voxel Framework`, and ensure it is enabled.
+2. **Open Python Console**: Open `Window -> Developer Tools -> Output Log`, and set the command bar to `Python` (or open the Python Console).
+3. **Execute Bootstrap**:
+   ```python
+   import VoxelFramework.SetupVoxelFramework as setup
+   setup.run()
+   ```
+4. **Inspect Created Assets**: The script automatically generates a clean, project-owned configuration under `/Game/VoxelFramework/`:
+   - `/Game/VoxelFramework/Config/DA_VoxelWorld_Default` (`UVoxelWorldDefinition`)
+   - `/Game/VoxelFramework/Config/DA_Generation_Default` (`UVoxelGenerationDefinition`)
+   - `/Game/VoxelFramework/Config/DA_Streaming_Default` (`UVoxelStreamingPreset`)
+   - `/Game/VoxelFramework/Config/DA_Physics_Default` (`UVoxelPhysicsPreset`)
+   - `/Game/VoxelFramework/Biomes/DA_Biome_Plains` (`UVoxelBiomeDefinition`)
+   - `/Game/VoxelFramework/Blocks/` (`DA_Block_Stone`, `DA_Block_Dirt`, `DA_Block_Grass`)
+5. **Press Play (PIE)**: Enter Play In Editor — walk on procedural terrain with dynamic Chaos collision, distance-based chunk streaming, and call Blueprint queries directly!
+
+---
 
 ## Module Status
 
@@ -80,22 +102,27 @@ graph TD;
 ## Architectural Highlights & Invariants
 
 1. **Strict Plugin / Game Boundary**: VoxelFramework is a generic, reusable plugin technology. Game-specific storylines, handcrafted landmark reservations, and quests live outside the plugin and consume it.
-2. **Data-Driven Configuration Precedence (ADR-007)**: Strict 4-tier precedence: `Project Settings` → `World Definition` → `Presets` → `Runtime Blueprint Overrides`.
-3. **Worker-Safe Runtime Structs**: All designer-facing UDataAssets (`UVoxelGenerationDefinition`) are translated into plain, immutable C++ structs (`FVoxelGenerationConfig`) at initialization on the Game Thread before worker dispatch, eliminating UObject contention and GC races.
-4. **Dedicated Physical Collision Architecture (ADR-006)**: Visual geometry (`UVoxelMeshComponent`, up to `RenderDistance=14`) and physical collision geometry (`UVoxelCollisionComponent`, up to `SimulationDistance=4`) are strictly decoupled.
-5. **Conservative Blueprint APIs**: Spatial queries (`TryGetBlockAtWorldPosition`, `TryIsSolidAtWorldPosition`) use explicit residency checks (`bool Try...`) and never trigger silent synchronous generation or frame drops.
-6. **Scheduler Terminal Completion & Bounded History**: Every submitted job has exactly one terminal completion path. `OnComplete` (and external lease cleanup) is guaranteed to execute across all job lifecycles.
-7. **World Shutdown Barrier**: `UVoxelWorldSubsystem::Deinitialize` waits on all in-flight worker tasks (`WaitForAllTasks`) before resetting storage.
-8. **Neighbor Lifetime Safety & Boundary Culling**: Meshing and collision acquire worker leases on all cardinal neighbors and only read `Ready` neighbors.
-9. **Compact 36-Byte Vertices**: `FVoxelMeshVertex` utilizes single-precision `FVector3f`, `FVector2f`, and `FColor` (36 bytes vs 80-byte double-precision legacy), slashing GPU bandwidth by ~55%.
-10. **Precomputed Relative Offsets & Single-Pass Streaming**: `UVoxelStreamingManager` translates pre-sorted relative offsets in $O(N)$ with 0 heap allocations and 0 runtime sorting.
+2. **Project-Owned Assets via Python Bootstrap**: Plugin source assets and code remain cleanly separated from project-owned game world configurations created under `/Game/VoxelFramework/`.
+3. **Data-Driven Configuration Precedence (ADR-007)**: Strict 4-tier precedence: `Project Settings` → `World Definition` → `Presets` → `Runtime Blueprint Overrides`.
+4. **Worker-Safe Runtime Structs**: All designer-facing UDataAssets (`UVoxelGenerationDefinition`) are translated into plain, immutable C++ structs (`FVoxelGenerationConfig`) at initialization on the Game Thread before worker dispatch, eliminating UObject contention and GC races.
+5. **Dedicated Physical Collision Architecture (ADR-006)**: Visual geometry (`UVoxelMeshComponent`, up to `RenderDistance=14`) and physical collision geometry (`UVoxelCollisionComponent`, up to `SimulationDistance=4`) are strictly decoupled.
+6. **Conservative Blueprint APIs & Static Libraries**: Static `UVoxelBlueprintLibrary` and `UVoxelStreamingBlueprintLibrary` allow direct graph calls from any Actor or Character with safe `bool Try...` queries that never cause synchronous hitches.
+7. **Scheduler Terminal Completion & Bounded History**: Every submitted job has exactly one terminal completion path. `OnComplete` (and external lease cleanup) is guaranteed to execute across all job lifecycles.
+8. **World Shutdown Barrier**: `UVoxelWorldSubsystem::Deinitialize` waits on all in-flight worker tasks (`WaitForAllTasks`) before resetting storage.
+9. **Neighbor Lifetime Safety & Boundary Culling**: Meshing and collision acquire worker leases on all cardinal neighbors and only read `Ready` neighbors.
+10. **Compact 36-Byte Vertices**: `FVoxelMeshVertex` utilizes single-precision `FVector3f`, `FVector2f`, and `FColor` (36 bytes vs 80-byte double-precision legacy), slashing GPU bandwidth by ~55%.
+11. **Precomputed Relative Offsets & Single-Pass Streaming**: `UVoxelStreamingManager` translates pre-sorted relative offsets in $O(N)$ with 0 heap allocations and 0 runtime sorting.
 
-## Testing (55 Passing Automation Tests)
+## Testing (59 Passing Automation Tests)
 
-The plugin leverages Unreal's Automation Testing framework with 55 passing tests ensuring complete subsystem integrity:
+The plugin leverages Unreal's Automation Testing framework with **59 passing tests** ensuring complete subsystem integrity:
 
 | Suite | Module | Covers |
 |---|---|---|
+| `Voxel.Authoring.AssetGraphValidation` | VoxelAssets | Validation of full starter asset reference graph |
+| `Voxel.Authoring.BlockAndBiomeDefinitions` | VoxelAssets | Block solidity, collision flags, and layer thickness rules |
+| `Voxel.Integration.WorldDefinitionApplication` | VoxelWorld | Subsystem seed/scale and runtime generation config propagation |
+| `Voxel.Integration.ConfigurationPrecedenceCascade` | VoxelWorld | 4-tier configuration precedence cascade |
 | `Voxel.Assets.BiomeLayerResolution` | VoxelAssets | Soft-pointer biome layer resolution & caching |
 | `Voxel.Configuration.BiomeDefinitionValidation` | VoxelAssets | Validation checks for biome terrain layers |
 | `Voxel.Configuration.BlockDefinitionValidation` | VoxelAssets | Duplicate and reserved block ID validation |

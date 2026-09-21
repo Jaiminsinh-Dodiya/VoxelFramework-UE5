@@ -216,12 +216,18 @@ graph TD
     - **Domain-Specific Preset Ownership**: Presets are housed strictly within their owning module domains (`UVoxelStreamingPreset` in `VoxelAssets`, `UVoxelPhysicsPreset` in `VoxelPhysics`).
     - **Predictable Blueprint Query Semantics**: Spatial queries (`TryGetBlockAtWorldPosition`, `TryIsSolidAtWorldPosition`) use explicit residency checks (`bool Try...`), ensuring pure Blueprint nodes never trigger synchronous generation or frame stalls.
     - **Actionable Configuration Validation**: `UVoxelConfigValidator` provides designer feedback with actionable suggestions for missing references, duplicate block IDs, and invalid ranges without enforcing arbitrary distance band constraints.
+15. **Unreal Python Bootstrap & Authoring Automation (Phase 9)**:
+    - **Single-Script Project Bootstrap (`SetupVoxelFramework.py`)**: A developer can enable the plugin, run one Unreal Python script via `Content/Python/VoxelFramework/SetupVoxelFramework.py` or the Output Log / Python console, and receive a complete, fully wired suite of project-owned `.uasset` configuration files under `/Game/VoxelFramework/`.
+    - **Dependency Graph Auto-Wiring**: Automatically creates Blocks (`Stone`, `Dirt`, `Grass`), Biomes (`Plains` with layered terrain), Sub-Presets (`DA_Generation_Default`, `DA_Streaming_Default`, `DA_Physics_Default`), and wires them cleanly into `DA_VoxelWorld_Default`.
+    - **Project Settings Auto-Assignment**: Sets `UVoxelWorldSettings::DefaultWorldDefinition` directly in the project configuration via `unreal.VoxelWorldSettings.get_default_object()`.
+    - **Strict Idempotency Model**: The script detects existing assets (`CREATE`, `UPDATE`, `SKIP`, `ERROR`). Subsequent executions safely update or skip without duplicating assets or breaking existing designer customizations.
+    - **Commandlet & Interactive Execution**: Runs cleanly both interactively within the Unreal Editor Python console and headlessly via `UnrealEditor-Cmd.exe -ExecutePythonScript`.
 
 ---
 
 ## 8. Design checkpoint — World/Game Design (frozen pending decisions)
 
-**Status: `VoxelRendering`, `VoxelWorld`, `VoxelStreaming`, `VoxelPhysics`, and `Phase 8 Framework Authoring & Developer UX` complete. Still open for anything touching Regions/Island Foundation.**
+**Status: `VoxelRendering`, `VoxelWorld`, `VoxelStreaming`, `VoxelPhysics`, `Phase 8 Framework Authoring`, and `Phase 9 Python Bootstrap & Workflow` complete. Still open for anything touching Regions/Island Foundation.**
 
 The project's scope has clarified since Phase 0: this is a **reusable framework whose first production customer is a specific game**, not a generic infinite-world voxel engine.
 
