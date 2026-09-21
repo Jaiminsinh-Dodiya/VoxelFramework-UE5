@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 3,
-	"VersionName": "2.3.0",
+	"Version": 4,
+	"VersionName": "2.5.0",
 	"FriendlyName": "Voxel Framework",
 	"Description": "Modular, data-driven voxel world framework. See Docs/ADR.md for architecture decisions.",
 	"Category": "Voxel",
